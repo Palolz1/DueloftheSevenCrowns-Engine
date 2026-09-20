@@ -1,0 +1,51 @@
+[gd_scene format=3 uid="uid://bhcjtt71wr27b"]
+
+[ext_resource type="Script" uid="uid://bgujubxhcbtbh" path="res://startgameplay.gd" id="1_rn54c"]
+[ext_resource type="Script" uid="uid://b4tp32n1ortp0" path="res://board_renderer.gd" id="2_raj8s"]
+[ext_resource type="Script" uid="uid://cs0ehjjgpg14c" path="res://input_handler.gd" id="3_7op6v"]
+[ext_resource type="Script" uid="uid://dlbjtqie4ewxf" path="res://PieceAnimator.gd" id="3_c7qo5"]
+[ext_resource type="Script" uid="uid://b18f2a6wqmek1" path="res://game_state.gd" id="4_1alog"]
+[ext_resource type="Script" uid="uid://cjbs1xxpijcar" path="res://u_icontroller.gd" id="5_4rw7v"]
+[ext_resource type="Script" uid="uid://bqejal4jf6lwv" path="res://bot_diff.gd" id="5_7op6v"]
+[ext_resource type="Script" uid="uid://b71336tpsnt42" path="res://info.gd" id="7_1alog"]
+[ext_resource type="Script" uid="uid://7ql0hgsm718s" path="res://brddrwr.gd" id="7_4rw7v"]
+
+[node name="Startgameplay" type="Node2D" unique_id=1375893414]
+script = ExtResource("1_rn54c")
+
+[node name="BackgroundLayer" type="CanvasLayer" parent="." unique_id=631328699]
+layer = -1
+
+[node name="Background" type="ColorRect" parent="BackgroundLayer" unique_id=1688222568]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.039215688, 0.05882353, 0.101960786, 1)
+
+[node name="BoardRenderer" type="Node2D" parent="." unique_id=2021468599]
+script = ExtResource("2_raj8s")
+
+[node name="PieceAnimator" type="Node2D" parent="BoardRenderer" unique_id=1277482076]
+script = ExtResource("3_c7qo5")
+
+[node name="InputHandler" type="Node2D" parent="." unique_id=509885692]
+script = ExtResource("3_7op6v")
+
+[node name="GameState" type="Node2D" parent="." unique_id=433189651]
+script = ExtResource("4_1alog")
+
+[node name="BotDiff" type="Node" parent="GameState" unique_id=298868893]
+script = ExtResource("5_7op6v")
+
+[node name="UIcontroller" type="CanvasLayer" parent="." unique_id=147660650]
+script = ExtResource("5_4rw7v")
+
+[node name="brddrwr" type="Control" parent="UIcontroller" unique_id=695396034]
+layout_mode = 3
+anchors_preset = 0
+script = ExtResource("7_4rw7v")
+
+[node name="Info" type="CanvasLayer" parent="." unique_id=543916010]
+script = ExtResource("7_1alog")

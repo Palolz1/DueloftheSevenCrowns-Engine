@@ -1,0 +1,106 @@
+name: Build DuelEngine extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "duel-engine/src/**"
+      - "duel-engine/SConstruct"
+      - "godot-cpp/**"
+      - ".github/workflows/build-extension.yml"
+  pull_request:
+    paths:
+      - "duel-engine/src/**"
+      - "duel-engine/SConstruct"
+      - "godot-cpp/**"
+      - ".github/workflows/build-extension.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            platform: windows
+          - name: linux
+            os: ubuntu-latest
+            platform: linux
+          - name: macos
+            os: macos-latest
+            platform: macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install scons
+        run: pip install scons
+
+      - name: Cache scons build objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.scons-cache
+          key: scons-${{ matrix.platform }}-${{ hashFiles('duel-engine/src/**', 'godot-cpp/src/**', 'godot-cpp/include/**') }}
+          restore-keys: |
+            scons-${{ matrix.platform }}-
+
+      - name: Build debug
+        working-directory: duel-engine
+        env:
+          SCONS_CACHE: ${{ github.workspace }}/.scons-cache
+        run: scons platform=${{ matrix.platform }} target=template_debug -j2
+
+      - name: Build release
+        working-directory: duel-engine
+        env:
+          SCONS_CACHE: ${{ github.workspace }}/.scons-cache
+        run: scons platform=${{ matrix.platform }} target=template_release -j2
+
+      - name: Upload extension binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: duelengine-${{ matrix.platform }}
+          path: |
+            duel-engine/demo/bin/*
+            !duel-engine/demo/bin/*.a
+            !duel-engine/demo/bin/*.lib
+            !duel-engine/demo/bin/*.exp
+            !duel-engine/demo/bin/*.pdb
+          if-no-files-found: error
+
+  commit-binaries:
+    name: Commit built binaries
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: duelengine-*
+          path: duel-engine/demo/bin
+          merge-multiple: true
+
+      - name: Commit binaries if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add duel-engine/demo/bin
+          if git diff --cached --quiet; then
+            echo "No binary changes to commit"
+          else
+            git commit -m "ci: update DuelEngine extension binaries [skip ci]"
+            git push
+          fi
