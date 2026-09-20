@@ -93,14 +93,28 @@ jobs:
           path: duel-engine/demo/bin
           merge-multiple: true
 
+      - name: Report downloaded binaries
+        run: |
+          echo "::group::Downloaded files"
+          find duel-engine/demo/bin -type f -exec sha256sum {} \;
+          echo "::endgroup::"
+          for f in duel-engine/demo/bin/libduelengine.windows.template_debug.x86_64.dll \
+                   duel-engine/demo/bin/libduelengine.windows.template_release.x86_64.dll; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Expected artifact file missing after download: $f"
+            fi
+          done
+
       - name: Commit binaries if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add duel-engine/demo/bin
+          git status --porcelain -- duel-engine/demo/bin
           if git diff --cached --quiet; then
-            echo "No binary changes to commit"
+            echo "::notice::No binary changes to commit"
           else
+            echo "::notice::Committing changed binaries: $(git diff --cached --name-only -- duel-engine/demo/bin | tr '\n' ' ')"
             git commit -m "ci: update DuelEngine extension binaries [skip ci]"
             git push
           fi
