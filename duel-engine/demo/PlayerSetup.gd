@@ -1,11 +1,22 @@
 #PlayerSetup.gd
 extends Control
 
-signal players_selected(white_type: String, black_type: String, game_type: String)
+signal players_selected(white_type: String, black_type: String, game_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float)
 
 var white_type: String = "human"
 var black_type: String = "human"
 var game_type: String = "untimed"
+
+# Editable time controls (minutes). Defaults match the classic presets.
+var standard_minutes: float = 15.0
+var armageddon_white_minutes: float = 10.0
+var armageddon_black_minutes: float = 8.0
+
+var _standard_spin: SpinBox
+var _arma_white_spin: SpinBox
+var _arma_black_spin: SpinBox
+var _standard_row: HBoxContainer
+var _arma_row: VBoxContainer
 
 # ------------------------------------------------------------------
 # CONFIGURATION — add new bots here and the UI adapts automatically
@@ -27,8 +38,8 @@ const OPTIONS: Array[Dictionary] = [
 # ------------------------------------------------------------------
 const GAME_TYPES: Array[Dictionary] = [
 	{ "id": "untimed",    "label": "Untimed",    "desc": "No clock",                              "accent": Color("#22c55e") },
-	{ "id": "standard",   "label": "Standard",   "desc": "15 min vs 15 min",                       "accent": Color("#facc15") },
-	{ "id": "armageddon", "label": "Armageddon", "desc": "10 min White vs 8 min Black, draw = Black wins", "accent": Color("#ef4444") },
+	{ "id": "standard",   "label": "Standard",   "desc": "Equal time for both sides (edit below)", "accent": Color("#facc15") },
+	{ "id": "armageddon", "label": "Armageddon", "desc": "White gets more time, draw = Black wins (edit below)", "accent": Color("#ef4444") },
 ]
 
 const BG_COLOR    := Color(0.039, 0.047, 0.086, 0.95)  # near-black overlay
@@ -109,7 +120,7 @@ func _build_ui():
 func _add_game_type_card(parent: Node):
 	var panel := PanelContainer.new()
 	panel.name = "GameTypePanel"
-	panel.custom_minimum_size = Vector2(180, 0)
+	panel.custom_minimum_size = Vector2(220, 0)
 
 	var panel_style := StyleBoxFlat.new()
 	panel_style.set_bg_color(PANEL_BG)
@@ -143,6 +154,10 @@ func _add_game_type_card(parent: Node):
 	var btn_col := VBoxContainer.new()
 	btn_col.add_theme_constant_override("separation", 8)
 	vbox.add_child(btn_col)
+
+	# Built before the buttons below so the default "untimed" selection
+	# (which fires `toggled` immediately) has rows to toggle visibility on.
+	_build_time_settings(vbox)
 
 	var group := ButtonGroup.new()
 
@@ -179,6 +194,8 @@ func _add_game_type_card(parent: Node):
 				game_type = gt["id"]
 				var style: StyleBoxFlat = panel.get_meta("border_style")
 				style.set_border_color(gt["accent"])
+				_standard_row.visible = gt["id"] == "standard"
+				_arma_row.visible = gt["id"] == "armageddon"
 		)
 
 		if gt["id"] == "untimed":
@@ -187,6 +204,78 @@ func _add_game_type_card(parent: Node):
 			style.set_border_color(gt["accent"])
 
 		btn_col.add_child(btn)
+
+func _make_minutes_spin(initial: float) -> SpinBox:
+	var spin := SpinBox.new()
+	spin.min_value = 1
+	spin.max_value = 180
+	spin.step = 1
+	spin.value = initial
+	spin.suffix = "min"
+	spin.custom_minimum_size = Vector2(64, 0)
+	spin.add_theme_color_override("font_color", Color("#e2e8f0"))
+	return spin
+
+func _build_time_settings(parent: Node):
+	var sep := HSeparator.new()
+	var line := StyleBoxLine.new()
+	line.color = Color("#334155")
+	line.thickness = 1
+	sep.add_theme_stylebox_override("separator", line)
+	parent.add_child(sep)
+
+	# ---- Standard: one shared time for both sides ----
+	_standard_row = HBoxContainer.new()
+	_standard_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	_standard_row.add_theme_constant_override("separation", 8)
+	_standard_row.visible = false
+	parent.add_child(_standard_row)
+
+	var std_lbl := Label.new()
+	std_lbl.text = "Minutes per side:"
+	std_lbl.add_theme_font_size_override("font_size", 13)
+	std_lbl.add_theme_color_override("font_color", Color("#cbd5e1"))
+	_standard_row.add_child(std_lbl)
+
+	_standard_spin = _make_minutes_spin(standard_minutes)
+	_standard_spin.value_changed.connect(func(v: float): standard_minutes = v)
+	_standard_row.add_child(_standard_spin)
+
+	# ---- Armageddon: separate White / Black times ----
+	_arma_row = VBoxContainer.new()
+	_arma_row.add_theme_constant_override("separation", 6)
+	_arma_row.visible = false
+	parent.add_child(_arma_row)
+
+	var white_row := HBoxContainer.new()
+	white_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	white_row.add_theme_constant_override("separation", 8)
+	_arma_row.add_child(white_row)
+
+	var white_lbl := Label.new()
+	white_lbl.text = "White minutes:"
+	white_lbl.add_theme_font_size_override("font_size", 13)
+	white_lbl.add_theme_color_override("font_color", Color("#cbd5e1"))
+	white_row.add_child(white_lbl)
+
+	_arma_white_spin = _make_minutes_spin(armageddon_white_minutes)
+	_arma_white_spin.value_changed.connect(func(v: float): armageddon_white_minutes = v)
+	white_row.add_child(_arma_white_spin)
+
+	var black_row := HBoxContainer.new()
+	black_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	black_row.add_theme_constant_override("separation", 8)
+	_arma_row.add_child(black_row)
+
+	var black_lbl := Label.new()
+	black_lbl.text = "Black minutes:"
+	black_lbl.add_theme_font_size_override("font_size", 13)
+	black_lbl.add_theme_color_override("font_color", Color("#cbd5e1"))
+	black_row.add_child(black_lbl)
+
+	_arma_black_spin = _make_minutes_spin(armageddon_black_minutes)
+	_arma_black_spin.value_changed.connect(func(v: float): armageddon_black_minutes = v)
+	black_row.add_child(_arma_black_spin)
 
 func _add_player_card(parent: Node, player_id: String, header: String, border_base: Color, header_color: Color):
 	var panel := PanelContainer.new()
@@ -286,4 +375,9 @@ func _add_player_card(parent: Node, player_id: String, header: String, border_ba
 
 func _on_start():
 	visible = false
-	players_selected.emit(white_type, black_type, game_type)
+	players_selected.emit(
+		white_type, black_type, game_type,
+		standard_minutes * 60.0,
+		armageddon_white_minutes * 60.0,
+		armageddon_black_minutes * 60.0
+	)

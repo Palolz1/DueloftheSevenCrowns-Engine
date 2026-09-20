@@ -17,13 +17,6 @@ var _winner: String = ""
 var _hovered_square: Array = []
 var _is_animating: bool = false
 
-# ------------------------------------------------------------------
-# TIME CONTROLS (seconds). Armageddon is intentionally asymmetric.
-# ------------------------------------------------------------------
-const STANDARD_TIME := 15.0 * 60.0
-const ARMAGEDDON_WHITE_TIME := 10.0 * 60.0
-const ARMAGEDDON_BLACK_TIME := 8.0 * 60.0
-
 func _ready():
 	# Center board on the left side, leaving room for the side panel
 	board_renderer.position = Vector2(80, 60)
@@ -60,7 +53,7 @@ func _show_player_setup():
 	get_tree().root.add_child(player_setup)  # Add to viewport root
 	player_setup.set_anchors_preset(Control.PRESET_FULL_RECT)
 
-func _on_players_selected(w_type: String, b_type: String, g_type: String):
+func _on_players_selected(w_type: String, b_type: String, g_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float):
 	white_player = w_type
 	black_player = b_type
 	game_type = g_type
@@ -70,9 +63,9 @@ func _on_players_selected(w_type: String, b_type: String, g_type: String):
 		"untimed":
 			game_state.setup_clock("untimed", 0.0, 0.0)
 		"standard":
-			game_state.setup_clock("standard", STANDARD_TIME, STANDARD_TIME)
+			game_state.setup_clock("standard", standard_seconds, standard_seconds)
 		"armageddon":
-			game_state.setup_clock("armageddon", ARMAGEDDON_WHITE_TIME, ARMAGEDDON_BLACK_TIME)
+			game_state.setup_clock("armageddon", armageddon_white_seconds, armageddon_black_seconds)
 
 	ui_controller.set_clocks_visible(game_type != "untimed")
 	if game_type != "untimed":
