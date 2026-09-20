@@ -27,6 +27,7 @@
 //      safely treated as a miss instead of corrupting search results.
 
 #include "duel_engine.h"
+#include <climits>
 #include <cmath>
 #include <cstring>
 

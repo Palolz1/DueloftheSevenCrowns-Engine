@@ -4,6 +4,23 @@ import sys
 
 env = SConscript("../godot-cpp/SConstruct")
 
+if env.get("is_msvc"):
+	# Without this, MSVC can pick different pointer-to-member-function
+	# representations for DuelEngine's bound methods in different translation
+	# units, which then fails to reinterpret_cast inside godot-cpp's
+	# create_method_bind() with "pointers to members have different
+	# representations; cannot cast between them" (C2440). /vmg forces the
+	# fully general representation everywhere so it's always consistent.
+	env.Append(CXXFLAGS=["/vmg"])
+
+if env["platform"] == "linux":
+	# godot-cpp generates hundreds of binding object files; linking them into
+	# libgodot-cpp.a via a plain `ar` command line overflows the OS argument
+	# limit on some CI runners. Route it through a response file instead,
+	# same as godot-cpp already does for its web platform (tools/web.py).
+	env["ARCOM_POSIX"] = env["ARCOM"].replace("$TARGET", "$TARGET.posix").replace("$SOURCES", "$SOURCES.posix")
+	env["ARCOM"] = "${TEMPFILE(ARCOM_POSIX)}"
+
 env.Replace(CPPDEFINES=["DUEL_ENGINE_EXPORT"])
 
 env.Append(CPPPATH=["src/"])
