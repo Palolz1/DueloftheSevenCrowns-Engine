@@ -108,10 +108,36 @@ class EvalGraph:
 		for i in n - 1:
 			var a := pts[i]
 			var b := pts[i + 1]
-			var col := Color(UITheme.IVORY, 0.16) if (a.y + b.y) / 2.0 < cy else Color(0.35, 0.42, 0.62, 0.22)
-			draw_colored_polygon(PackedVector2Array([a, b, Vector2(b.x, cy), Vector2(a.x, cy)]), col)
+			if (a.y - cy) * (b.y - cy) < 0.0:
+				# the line crosses zero inside this segment: split it there, otherwise
+				# the quad folds into a self-intersecting "bow tie"
+				var x := a.x + (b.x - a.x) * (cy - a.y) / (b.y - a.y)
+				_shade(PackedVector2Array([a, Vector2(x, cy), Vector2(a.x, cy)]), a.y < cy)
+				_shade(PackedVector2Array([Vector2(x, cy), b, Vector2(b.x, cy)]), b.y < cy)
+			else:
+				_shade(PackedVector2Array([a, b, Vector2(b.x, cy), Vector2(a.x, cy)]), (a.y + b.y) / 2.0 < cy)
 		draw_polyline(pts, UITheme.GOLD, 2.0, true)
 		draw_circle(pts[n - 1], 4.0, UITheme.GOLD_LIGHT)
+
+	# Fills one shaded piece, skipping slivers with (almost) no area -- Godot
+	# can't triangulate those and logs "Invalid polygon data".
+	func _shade(raw: PackedVector2Array, above: bool):
+		var poly := PackedVector2Array()
+		for p in raw:  # drop repeated corners (a point lying exactly on zero)
+			if poly.is_empty() or not p.is_equal_approx(poly[poly.size() - 1]):
+				poly.append(p)
+		if poly.size() > 1 and poly[0].is_equal_approx(poly[poly.size() - 1]):
+			poly.remove_at(poly.size() - 1)
+		if poly.size() < 3:
+			return
+		var area := 0.0
+		for i in poly.size():
+			var p := poly[i]
+			var q := poly[(i + 1) % poly.size()]
+			area += p.x * q.y - q.x * p.y
+		if absf(area) < 1.0:
+			return
+		draw_colored_polygon(poly, Color(UITheme.IVORY, 0.16) if above else Color(0.35, 0.42, 0.62, 0.22))
 
 
 # A player's strip above or below the board.
