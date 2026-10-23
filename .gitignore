@@ -32,3 +32,7 @@ duel-engine/demo/bin/*.a
 duel-engine/demo/bin/*.lib
 duel-engine/demo/bin/*.exp
 duel-engine/demo/bin/*.pdb
+
+# Godot hot-reload copies of the extension, and the old standalone engine folder
+duel-engine/demo/bin/~*
+/fairy-stockfish/
