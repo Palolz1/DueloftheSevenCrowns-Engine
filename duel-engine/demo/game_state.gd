@@ -3,6 +3,20 @@ extends Node2D
 
 var engine: DuelEngine
 var hint_engine: DuelEngine
+# Fairy-Stockfish does all the searching when it's available (bots, hints,
+# eval bar). DuelEngine still handles legal moves / check detection, and is
+# the automatic fallback if Fairy-Stockfish can't be started.
+var fairy: FairyEngine = null       # bots + eval
+var fairy_hint: FairyEngine = null  # background hint/eval search
+var use_fairy := false
+# Every move of the game so far in UCI notation (what Fairy-Stockfish needs,
+# including for repetition and the 40-move rule).
+var uci_moves: Array = []
+# How long each slice of the background hint search runs. Short slices keep
+# the UI responsive when a move is made; the engine's hash table carries the
+# work over, so the depth still climbs from slice to slice.
+const HINT_SLICE_MS := 300
+const HINT_SLICES := 40
 var hint_thread: Thread = null
 var hint_mutex: Mutex = Mutex.new()
 var hint_stop := false
@@ -24,8 +38,29 @@ var legal_moves: Array = []
 var last_move = null
 var halfmove_clock: int = 0
 var move_history: Array = []
+# Engine position keys (side to move included) for every position since the
+# last capture/promotion, oldest first, current position last. Positions from
+# before an irreversible move can never recur, so the list is cleared then.
+# Used for threefold repetition and handed to the engines so their searches
+# know which positions would repeat.
+var position_keys: Array = []
 var game_over: bool = false
 var current_eval_score: float = 0.0
+# White-relative mate string from the engine ("M3" = White mates in 3,
+# "-M2" = Black mates in 2, "" = no forced mate known). When set, it
+# overrides current_eval_score for display.
+var current_eval_mate: String = ""
+# Search depth behind the current eval. Within one position a result only
+# replaces the displayed eval if it searched at least as deep, so a stray
+# depth-1 hint result can't overwrite the bot's depth-8 verdict.
+var current_eval_depth: int = -1
+# Large sentinel used for decided positions (game already over).
+const EVAL_DECIDED := 1000000.0
+# How long the instant post-move evaluation search runs. This replaces the
+# old static evaluate_position() call, which could not see any tactics and
+# routinely showed numbers like +2000 for positions that were really mates
+# (or really nothing). The hint/bot searches refine it afterwards.
+const QUICK_EVAL_TIME := 0.12
 
 # ------------------------------------------------------------------
 # CLOCK STATE — untimed / standard / armageddon
@@ -64,9 +99,56 @@ func _ready():
 	# Hints run continuously in the background, so they get roughly half
 	# the threads (min 1), leaving headroom for the rest of the game/OS.
 	hint_threads = max(1, search_threads / 2)
+	_start_fairy()
 	reset_game()
 	# _run_perft_table() 
 	#only uncomment if you need to use it
+
+func _start_fairy():
+	fairy = FairyEngine.new()
+	if fairy.start(search_threads):
+		fairy_hint = FairyEngine.new()
+		if not fairy_hint.start(hint_threads):
+			push_warning("Fairy-Stockfish hint engine failed: " + fairy_hint.last_error)
+			fairy_hint = null
+		use_fairy = true
+		print("[GameState] Using Fairy-Stockfish (", FairyEngine.binary_name(), ")")
+	else:
+		push_warning("Fairy-Stockfish unavailable, using DuelEngine: " + fairy.last_error)
+		fairy = null
+		use_fairy = false
+
+func _exit_tree():
+	_stop_hint_thread()
+	if bot_thread != null and bot_thread.is_started():
+		bot_thread.wait_to_finish()
+	if fairy != null:
+		fairy.shutdown()
+	if fairy_hint != null:
+		fairy_hint.shutdown()
+
+# ------------------------------------------------------------------
+# SEARCH FACADE -- everything that wants an engine search goes through
+# here, so Fairy-Stockfish / DuelEngine is decided in one place.
+# Same result shape as DuelEngine.find_best_move().
+# ------------------------------------------------------------------
+# skill: Fairy-Stockfish Skill Level 0-20 (ignored by DuelEngine).
+func search_best(max_depth: int, time_limit: float, skill: int = 20) -> Dictionary:
+	if use_fairy and fairy != null and fairy.ok:
+		var r = fairy.go(uci_moves, int(time_limit * 1000.0), max_depth, turn == "white", skill)
+		if not r.is_empty():
+			return r
+	return engine.find_best_move(max_depth if max_depth > 0 else 64, time_limit, halfmove_clock, search_threads)
+
+# Scores every legal move for the side to move (bots use this to pick
+# human-like alternatives). duel_depth / fairy_depth: search depth for each
+# engine (Fairy-Stockfish's depths are "cheaper", so it gets a deeper one).
+func score_all_moves(duel_depth: int, fairy_depth: int, time_limit: float) -> Array:
+	if use_fairy and fairy != null and fairy.ok:
+		var r = fairy.score_all(uci_moves, fairy_depth, int(time_limit * 1000.0))
+		if not r.is_empty():
+			return r
+	return engine.score_moves(duel_depth, time_limit, halfmove_clock)
 
 func _run_perft_table():
 	var test_engine = DuelEngine.new()
@@ -89,6 +171,9 @@ func start_hint_search():
 func stop_hint_search():
 	hint_enabled = false
 	_stop_hint_thread()
+	# Invalidate results the worker already queued with call_deferred;
+	# otherwise they land after we stopped and clobber the eval.
+	hint_gen += 1
 	hint_arrow = null
 	board_changed.emit()
 
@@ -112,10 +197,29 @@ func _restart_hint_search():
 	hint_mutex.unlock()
 
 	hint_engine.set_board(board, turn)
+	hint_engine.set_repetition_history(_previous_position_keys())
 	var hm = halfmove_clock
 
 	hint_thread = Thread.new()
-	hint_thread.start(_hint_worker.bind(gen, hm))
+	if fairy_hint != null and fairy_hint.ok:
+		hint_thread.start(_fairy_hint_worker.bind(gen, uci_moves.duplicate(), turn == "white"))
+	else:
+		hint_thread.start(_hint_worker.bind(gen, hm))
+
+func _fairy_hint_worker(gen: int, moves: Array, white_to_move: bool):
+	for i in HINT_SLICES:
+		hint_mutex.lock()
+		var stop = hint_stop
+		hint_mutex.unlock()
+		if stop or gen != hint_gen:
+			return
+		var result = fairy_hint.go(moves, HINT_SLICE_MS, 0, white_to_move)
+		hint_mutex.lock()
+		stop = hint_stop
+		hint_mutex.unlock()
+		if stop or gen != hint_gen or result.is_empty():
+			return
+		call_deferred("_on_hint_result", result, gen)
 
 func _hint_worker(gen: int, hm: int):
 	for d in range(1, 26):
@@ -146,12 +250,9 @@ func _on_hint_result(result: Dictionary, gen: int):
 		hint_arrow = null
 	
 	if result.has("score"):
-		var white_relative = result.score if turn == "white" else -result.score
-		hint_score = white_relative
-		current_eval_score = white_relative
-	
-	if result.has("mate"):
-		hint_mate = result.mate
+		_set_eval_from_search(result, turn)
+		hint_score = current_eval_score
+		hint_mate = current_eval_mate
 	
 	hint_updated.emit()
 	board_changed.emit()
@@ -170,12 +271,21 @@ func reset_game():
 	last_move = null
 	halfmove_clock = 0
 	move_history.clear()
+	uci_moves.clear()
+	if fairy != null:
+		fairy.new_game()
+	if fairy_hint != null:
+		fairy_hint.new_game()
 	game_over = false
 	current_eval_score = 0.0
+	current_eval_mate = ""
+	current_eval_depth = -1
 	# Clocks are re-armed by setup_clock() once the next game's type is
 	# chosen in PlayerSetup; until then leave them inert.
 	clock_enabled = false
 	engine.set_board(board, turn)
+	position_keys = [engine.get_position_key()]
+	engine.set_repetition_history([])
 	board_changed.emit()
 
 # ------------------------------------------------------------------
@@ -268,12 +378,17 @@ func execute_move(from_r: int, from_c: int, to_r: int, to_c: int):
 	else:
 		halfmove_clock += 1
 	move_history.append(_format_move(piece, from_r, from_c, to_r, to_c, is_capture, promotion))
+	uci_moves.append(FairyEngine.move_to_uci(from_r, from_c, to_r, to_c, promotion))
 	last_move = [[from_r, from_c], [to_r, to_c]]
 	selected_square = []
 	legal_moves = []
 	turn = "black" if turn == "white" else "white"
 	turn_grace_remaining = TURN_GRACE_PERIOD if clock_enabled else 0.0
 	engine.set_board(board, turn)
+	if is_capture or promotion:
+		position_keys.clear()
+	position_keys.append(engine.get_position_key())
+	engine.set_repetition_history(_previous_position_keys())
 	_check_game_end()
 	if not game_over and engine.is_in_check(turn):
 		SFXhandler.play("check")
@@ -283,10 +398,62 @@ func execute_move(from_r: int, from_c: int, to_r: int, to_c: int):
 
 
 func _update_eval():
-	if engine.has_method("evaluate_position"):
-		current_eval_score = engine.evaluate_position(halfmove_clock)
+	current_eval_mate = ""
+	current_eval_depth = -1  # new position: any search result is welcome
+	if game_over:
+		_set_decided_eval()
+		return
+	# Short real search instead of the static eval (see QUICK_EVAL_TIME).
+	var r = search_best(0, QUICK_EVAL_TIME)
+	if r.has("score"):
+		_set_eval_from_search(r, turn)
 	else:
+		_set_decided_eval()
+
+# Stores a find_best_move() result as the displayed eval. `side` is the
+# colour that was to move in the searched position (the engine's score is
+# relative to that side; its "mate" string is already White-relative).
+func _set_eval_from_search(result: Dictionary, side: String):
+	var d := int(result.get("depth", 0))
+	if d < current_eval_depth:
+		return
+	current_eval_depth = d
+	var s := float(result.score)
+	current_eval_score = s if side == "white" else -s
+	current_eval_mate = result.get("mate", "")
+
+func _set_decided_eval():
+	# No legal moves for the side to move = loss (no stalemate in this game).
+	if engine.is_insufficient_material() or halfmove_clock >= 40 or is_threefold_repetition():
 		current_eval_score = 0.0
+		current_eval_mate = ""
+		return
+	var has_moves := false
+	for r in range(7):
+		for c in range(7):
+			if is_own_piece(r, c) and not engine.get_legal_moves(r, c).is_empty():
+				has_moves = true
+	if has_moves:
+		return
+	current_eval_score = -EVAL_DECIDED if turn == "white" else EVAL_DECIDED
+	current_eval_mate = "-M0" if turn == "white" else "M0"
+
+# Called (deferred, from the bot thread) with the bot's own search of the
+# position it is about to move in -- far better than any static number.
+func report_search_eval(result: Dictionary, side: String, ply: int):
+	if ply != move_history.size() or side != turn or not result.has("score"):
+		return  # stale (position has changed since the search started)
+	_set_eval_from_search(result, side)
+	board_changed.emit()
+
+# True when the current position (same pieces, same side to move) has now
+# occurred three times.
+func is_threefold_repetition() -> bool:
+	return not position_keys.is_empty() and position_keys.count(position_keys.back()) >= 3
+
+# Every tracked position except the current one (what the engines want).
+func _previous_position_keys() -> Array:
+	return position_keys.slice(0, max(0, position_keys.size() - 1))
 
 func _check_game_end():
 	if engine.is_checkmate():
@@ -311,6 +478,10 @@ func _check_game_end():
 		game_over = true
 		var winner = "Black" if turn == "white" else "White"
 		game_ended.emit("no_legal_moves", winner)
+		return
+
+	if is_threefold_repetition():
+		_end_game_draw("repetition")
 		return
 
 	if halfmove_clock >= 40:

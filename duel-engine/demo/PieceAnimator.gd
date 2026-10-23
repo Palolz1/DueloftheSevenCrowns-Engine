@@ -91,39 +91,12 @@ func animate_illegal_wiggle(row: int, col: int, piece_code: String) -> void:
 	_tween.tween_callback(_finish_move)
 
 func _build_piece_visual(code: String) -> Node2D:
-	var board_renderer = get_parent()
-	var image_name = board_renderer.piece_image_names.get(code, "")
-	var is_white = code.begins_with("w")
-	var token_color = board_renderer.white_token_color if is_white else board_renderer.black_token_color
-
-	var container = Node2D.new()
-
-	var token = Panel.new()
-	var token_size = 56
-	token.position = Vector2(-token_size / 2, -token_size / 2)
-	token.size = Vector2(token_size, token_size)
-	var token_style = StyleBoxFlat.new()
-	token_style.bg_color = token_color
-	token_style.corner_radius_top_left = token_size / 2
-	token_style.corner_radius_top_right = token_size / 2
-	token_style.corner_radius_bottom_left = token_size / 2
-	token_style.corner_radius_bottom_right = token_size / 2
-	token.add_theme_stylebox_override("panel", token_style)
-	container.add_child(token)
-
-	if image_name != "":
-		var texture = board_renderer._get_texture(image_name)
-		var sprite = Sprite2D.new()
-		sprite.texture = texture
-		sprite.scale = Vector2(1.5, 1.5)
-		sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		container.add_child(sprite)
-
-	return container
+	# Same visual as the static pieces (built by BoardRenderer).
+	return get_parent().make_piece_visual(code)
 
 func _flash_square(row: int, col: int) -> void:
 	var flash = ColorRect.new()
-	flash.position = Vector2(col * CELL_SIZE, row * CELL_SIZE)
+	flash.position = get_parent().cell_pos(row, col)
 	flash.size = Vector2(CELL_SIZE, CELL_SIZE)
 	flash.color = Color("#ef4444")
 	flash.modulate = Color(1, 1, 1, 0.5)
@@ -136,7 +109,7 @@ func _flash_square(row: int, col: int) -> void:
 
 
 func _cell_center(row: int, col: int) -> Vector2:
-	return Vector2(col * CELL_SIZE + CELL_SIZE / 2, row * CELL_SIZE + CELL_SIZE / 2)
+	return get_parent().cell_center(row, col)  # follows board flipping
 
 
 func _kill_active() -> void:

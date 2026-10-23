@@ -1,130 +1,250 @@
 #u_icontroller.gd
+# In-game interface: a player bar above and below the board (name, level,
+# captured pieces, clock), and a sidebar with the evaluation, move list and
+# controls. Layout is in logical pixels of the 1280x800 design viewport; the
+# window's stretch mode scales it to any window size.
 extends CanvasLayer
 
-# Small radial "pie" indicator that unfills clockwise to show the
-# per-turn grace period (couch-versus buffer) draining. fraction 1.0
-# means the full buffer is still available; 0.0 means it's gone and
-# the clock is now actively counting down.
+# ---------------------------------------------------------------------------
+# Layout (must match StartGameplay.BOARD_ORIGIN)
+# ---------------------------------------------------------------------------
+const BOARD_ORIGIN := Vector2(138, 116)
+const BOARD_PX := 560
+const FRAME := 26
+const BAR_H := 56
+const SIDEBAR_RECT := Rect2(748, 24, 420, 744)
+
+const CLOCK_WARN_SECONDS := 60.0
+const CLOCK_DANGER_SECONDS := 30.0
+
+# Graph is in pawns (engine centipawns / 100). Mates are pinned to +/-CAP.
+const EVAL_GRAPH_CAP := 20.0
+const EVAL_GRAPH_MIN_BOUND := 2.0
+
+const START_COUNTS := {"K": 1, "N": 2, "C": 1, "P": 1, "W": 1, "M": 1, "D": 7}
+const PIECE_ORDER := ["M", "C", "P", "W", "L", "N", "D"]
+
+
+# ---------------------------------------------------------------------------
+# Small custom-drawn widgets
+# ---------------------------------------------------------------------------
+# Radial "pie" that unfills clockwise while the per-turn grace period drains.
 class GraceRing:
 	extends Control
 	var fraction: float = 1.0
-	var ring_color: Color = Color("#38bdf8")
+	var ring_color: Color = Color("#5b8df0")
 
 	func _draw():
 		var r = min(size.x, size.y) / 2.0 - 2.0
 		if r <= 0.0:
 			return
 		var center = size / 2.0
-		# Dim background track so the ring is visible even at fraction 0.
-		draw_arc(center, r, 0.0, TAU, 32, Color(1, 1, 1, 0.18), 3.0, true)
+		draw_arc(center, r, 0.0, TAU, 32, Color(1, 1, 1, 0.15), 3.0, true)
 		if fraction > 0.001:
-			var start_angle = -PI / 2.0
-			var end_angle = start_angle + TAU * fraction
-			draw_arc(center, r, start_angle, end_angle, 32, ring_color, 3.0, true)
+			draw_arc(center, r, -PI / 2.0, -PI / 2.0 + TAU * fraction, 32, ring_color, 3.0, true)
 
 	func set_fraction(f: float):
 		fraction = clampf(f, 0.0, 1.0)
 		queue_redraw()
 
-var turn_label: Label
-var turn_counter_label: Label
+
+# Horizontal White-vs-Black balance bar.
+class EvalBar:
+	extends Control
+	var value := 0.0  # White-relative pawns (mates come in as +/-CAP)
+
+	func _draw():
+		var w := size.x
+		var h := size.y
+		var share := 0.5 + 0.5 * tanh(value / 4.0)   # 0 = Black winning, 1 = White
+		var bg := StyleBoxFlat.new()
+		bg.bg_color = UITheme.SLATE
+		bg.set_corner_radius_all(int(h / 2))
+		draw_style_box(bg, Rect2(Vector2.ZERO, size))
+		var fill := StyleBoxFlat.new()
+		fill.bg_color = UITheme.IVORY
+		fill.set_corner_radius_all(int(h / 2))
+		if share > 0.02:
+			draw_style_box(fill, Rect2(Vector2.ZERO, Vector2(max(h, w * share), h)))
+		draw_line(Vector2(w / 2.0, 1), Vector2(w / 2.0, h - 1), Color(UITheme.GOLD, 0.7), 2.0)
+
+
+# Evaluation history line chart.
+class EvalGraph:
+	extends Control
+	var points: Array = []   # pawns, White-relative, one per position
+	var cap := 20.0
+	var min_bound := 2.0
+
+	func _draw():
+		var bg := StyleBoxFlat.new()
+		bg.bg_color = UITheme.SURFACE_LO
+		bg.set_corner_radius_all(10)
+		bg.border_color = UITheme.BORDER_SOFT
+		bg.set_border_width_all(1)
+		draw_style_box(bg, Rect2(Vector2.ZERO, size))
+		var m := 10.0
+		var w := size.x - 2 * m
+		var h := size.y - 2 * m
+		var cy := m + h / 2.0
+		draw_line(Vector2(m, cy), Vector2(m + w, cy), Color(UITheme.BORDER, 0.9), 1.0)
+
+		var bound := min_bound
+		for p in points:
+			bound = maxf(bound, absf(clampf(p, -cap, cap)))
+		var font := UITheme.ui(600)
+		draw_string(font, Vector2(m + 2, m + 10), "+%d" % int(round(bound)), HORIZONTAL_ALIGNMENT_LEFT, -1, 10, UITheme.TEXT_FAINT)
+		draw_string(font, Vector2(m + 2, m + h - 1), "-%d" % int(round(bound)), HORIZONTAL_ALIGNMENT_LEFT, -1, 10, UITheme.TEXT_FAINT)
+		if points.size() < 2:
+			return
+
+		var pts := PackedVector2Array()
+		var n := points.size()
+		for i in n:
+			var x := m + w * float(i) / float(n - 1)
+			var y := cy - clampf(points[i] / bound, -1.0, 1.0) * (h / 2.0)
+			pts.append(Vector2(x, y))
+		# shaded areas: ivory above the centre line, slate below
+		for i in n - 1:
+			var a := pts[i]
+			var b := pts[i + 1]
+			var col := Color(UITheme.IVORY, 0.16) if (a.y + b.y) / 2.0 < cy else Color(0.35, 0.42, 0.62, 0.22)
+			draw_colored_polygon(PackedVector2Array([a, b, Vector2(b.x, cy), Vector2(a.x, cy)]), col)
+		draw_polyline(pts, UITheme.GOLD, 2.0, true)
+		draw_circle(pts[n - 1], 4.0, UITheme.GOLD_LIGHT)
+
+
+# A player's strip above or below the board.
+class PlayerBar:
+	extends PanelContainer
+	var color := "white"
+	var token_holder: Control
+	var name_label: Label
+	var sub_label: Label
+	var captured_box: HBoxContainer
+	var thinking_label: Label
+	var clock_panel: PanelContainer
+	var clock_label: Label
+	var grace: GraceRing
+	var _active := false
+	var _dots := 0.0
+
+	func build(c: String):
+		color = c
+		custom_minimum_size = Vector2(0, 56)
+		var row := UITheme.hbox(12)
+		row.alignment = BoxContainer.ALIGNMENT_BEGIN
+		add_child(row)
+		token_holder = UITheme.piece_token(("w" if c == "white" else "b") + "K", 38)
+		token_holder.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(token_holder)
+		var names := UITheme.vbox(0)
+		names.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(names)
+		name_label = UITheme.label(c.capitalize(), 17, UITheme.TEXT, UITheme.ui(650))
+		names.add_child(name_label)
+		sub_label = UITheme.label("", 12, UITheme.TEXT_DIM, UITheme.ui(500))
+		names.add_child(sub_label)
+		captured_box = UITheme.hbox(1)
+		captured_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(captured_box)
+		row.add_child(UITheme.spacer())
+		thinking_label = UITheme.label("", 13, UITheme.GOLD_LIGHT, UITheme.ui(600))
+		thinking_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(thinking_label)
+		clock_panel = UITheme.panel(UITheme.box(UITheme.SURFACE_LO, 9, UITheme.BORDER, 1, 0))
+		clock_panel.custom_minimum_size = Vector2(124, 40)
+		clock_panel.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(clock_panel)
+		var crow := UITheme.hbox(8)
+		crow.alignment = BoxContainer.ALIGNMENT_CENTER
+		clock_panel.add_child(crow)
+		grace = GraceRing.new()
+		grace.custom_minimum_size = Vector2(18, 18)
+		grace.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		grace.visible = false
+		crow.add_child(grace)
+		clock_label = UITheme.label("--:--", 22, UITheme.TEXT, UITheme.ui(700))
+		crow.add_child(clock_label)
+		set_active(false)
+
+	func set_active(a: bool):
+		_active = a
+		var st := UITheme.box(UITheme.SURFACE if a else UITheme.INK_2, 12,
+			UITheme.GOLD if a else UITheme.BORDER_SOFT, 2 if a else 1, 0)
+		st.content_margin_left = 12
+		st.content_margin_right = 8
+		add_theme_stylebox_override("panel", st)
+		var cst := UITheme.box(UITheme.GOLD if a else UITheme.SURFACE_LO, 9, UITheme.GOLD if a else UITheme.BORDER, 1, 0)
+		clock_panel.add_theme_stylebox_override("panel", cst)
+		clock_label.add_theme_color_override("font_color", Color("#1b1406") if a else UITheme.TEXT_DIM)
+
+	func set_thinking(on: bool):
+		thinking_label.visible = on
+		_dots = 0.0
+		set_process(on)
+
+	func _process(delta):
+		_dots += delta * 3.0
+		thinking_label.text = "thinking" + ".".repeat(int(_dots) % 4)
+
+	func set_captured(codes: Array):
+		for ch in captured_box.get_children():
+			ch.queue_free()
+		for code in codes:
+			var t := TextureRect.new()
+			t.texture = load("res://piecepng/%s.png" % code)
+			t.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+			t.custom_minimum_size = Vector2(20, 20)
+			t.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			t.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			t.modulate = Color(1, 1, 1, 0.9)
+			captured_box.add_child(t)
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+var turn_label: Label          # "White to move"
+var turn_counter_label: Label  # "Turn 3"
 var eval_label: Label
 var status_label: Label
-var players_label: Label
+var hint_toggle: CheckButton
 var new_game_btn: Button
+var flip_btn: Button
 var info_btn: Button
 var clear_drawings_btn: Button
-var hint_toggle: CheckButton
-var white_clock_label: Label
-var black_clock_label: Label
-var white_grace_ring: Control
-var black_grace_ring: Control
+var board_drawer: Control = null
+
+var top_bar: PlayerBar
+var bottom_bar: PlayerBar
+var _bars := {}            # "white"/"black" -> PlayerBar
+var _eval_bar: EvalBar
+var _eval_graph: EvalGraph
+var _moves_grid: GridContainer
+var _moves_scroll: ScrollContainer
+var _game_over_layer: Control = null
 
 var turn_number: int = 1
+var eval_history = []
+var last_logged_eval = 999999.0
+var last_logged_label := ""
 
-# Clock display state — persists across UI rebuilds (resize) since
-# _create_ui() rebuilds the label nodes from scratch each time.
-var _clocks_visible: bool = false
-var _last_white_time: float = 0.0
-var _last_black_time: float = 0.0
+var _clocks_visible := false
+var _flipped := false
+var _player_types := {"white": "human", "black": "human"}
 
-# Low-time warning thresholds, in seconds.
-const CLOCK_WARN_SECONDS := 60.0
-const CLOCK_DANGER_SECONDS := 30.0
-
-
-# Modern dark theme colors
-var bg_color = Color("#0f172a")
-var panel_color = Color("#1e293b")
-var border_color = Color("#334155")
-var text_primary = Color("#f1f5f9")
-var text_secondary = Color("#94a3b8")
-var text_accent = Color("#38bdf8")
-var accent_color = Color("#3b82f6")
-var white_color = Color("#e2e8f0")
-var black_color = Color("#94a3b8")
-var clock_warn_color = Color("#f59e0b")
-var clock_danger_color = Color("#ef4444")
-var board_drawer: Control = null
-# Layout cache (recalculated on resize)
-var _layout: Dictionary = {}
 
 func _ready():
 	layer = 1
-	_recalc_layout()
 	_create_ui()
 	_create_board_drawer()
-	get_viewport().size_changed.connect(_on_viewport_resized)
 	var game_state = get_parent().get_node("GameState")
 	game_state.turn_changed.connect(_on_turn_changed)
 	game_state.game_ended.connect(_on_game_ended)
 	game_state.thinking_started.connect(_on_thinking)
 	game_state.thinking_finished.connect(_on_thinking_done)
 
-func _on_viewport_resized():
-	_recalc_layout()
-	_rebuild_ui()
-	_update_board_drawer()
-
-func _recalc_layout():
-	var vp = get_viewport().get_visible_rect().size
-	var h = vp.y
-	var w = vp.x
-	
-	# Board takes up available height minus padding, or 65% of width
-	var board_size = min(h - 40, w * 0.62)
-	board_size = max(board_size, 360)
-	
-	var panel_x = board_size + max(50, int(board_size * 0.035))
-	var panel_w = w - panel_x - 12
-	panel_w = max(panel_w, 220)
-	
-	var sc = board_size / 700.0
-	
-	_layout = {
-		"vp": vp,
-		"board_size": board_size,
-		"panel_x": panel_x,
-		"panel_w": panel_w,
-		"panel_h": h,
-		"scale": sc,
-		"pad": int(20 * sc),
-		"line_h": int(24 * sc),
-		"title_y": int(16 * sc),
-		"turn_card_y": int(100 * sc),
-		"clock_y": int(150 * sc),
-		"eval_y": int(210 * sc),
-		"players_y": int(250 * sc),
-		"hint_y": int(330 * sc),
-		"new_game_y": int(390 * sc),
-		"info_btn_y": int(444 * sc),
-		"clear_drawings_y": int(484 * sc),
-		"status_y": int(530 * sc),
-		"graph_y": int(h - 160 * sc),
-		"graph_w": int(panel_w - 32),
-		"graph_h": int(100 * sc),
-		"graph_margin": int(10 * sc),
-	}
 
 func _create_board_drawer():
 	var drawer = preload("res://brddrwr.gd").new()
@@ -133,475 +253,450 @@ func _create_board_drawer():
 	board_drawer = drawer
 
 func align_drawer_to_board(board_global_pos: Vector2):
-	if board_drawer == null:
-		return
-	board_drawer.align_to_board(board_global_pos)
+	if board_drawer != null:
+		board_drawer.align_to_board(board_global_pos)
 
-func _update_board_drawer():
-	var board_renderer = get_parent().get_node("BoardRenderer")
-	align_drawer_to_board(board_renderer.global_position)
 
-func _get_layout() -> Dictionary:
-	return _layout
-
-func _clear_ui():
-	for child in get_children():
-		remove_child(child)
-		child.free()
-
-func _rebuild_ui():
-	_clear_ui()
-	_create_ui()
-	_create_board_drawer()
-	# Re-align after rebuild — board_renderer.global_position is stable
-	var board_renderer = get_parent().get_node("BoardRenderer")
-	align_drawer_to_board(board_renderer.global_position)
-	if eval_history.size() > 0:
-		_update_eval_graph(last_logged_eval)
-	if _clocks_visible:
-		update_clocks(_last_white_time, _last_black_time)
-
+# ---------------------------------------------------------------------------
+# Building
+# ---------------------------------------------------------------------------
 func _create_ui():
-	var L = _get_layout()
-	var px = L.panel_x
-	var pw = L.panel_w
-	var ph = L.panel_h
-	var sc = L.scale
-	var pad = L.pad
+	var frame_x := BOARD_ORIGIN.x - FRAME
+	var frame_w := BOARD_PX + FRAME * 2
 
-	# --- Background Panel ---
-	var panel = Panel.new()
-	panel.position = Vector2(px, 0)
-	panel.size = Vector2(pw, ph)
-	var panel_style = StyleBoxFlat.new()
-	panel_style.bg_color = panel_color
-	panel_style.border_width_left = max(1, int(2 * sc))
-	panel_style.border_width_right = 0
-	panel_style.border_width_top = 0
-	panel_style.border_width_bottom = 0
-	panel_style.border_color = border_color
-	panel.add_theme_stylebox_override("panel", panel_style)
-	add_child(panel)
+	top_bar = PlayerBar.new()
+	top_bar.build("white")
+	top_bar.position = Vector2(frame_x, BOARD_ORIGIN.y - FRAME - 10 - BAR_H)
+	top_bar.size = Vector2(frame_w, BAR_H)
+	add_child(top_bar)
 
-	# --- Title ---
-	var title = Label.new()
-	title.text = "Duel of the Seven Crowns"
-	title.position = Vector2(px + pad, L.title_y)
-	title.add_theme_font_size_override("font_size", int(24 * sc))
-	title.add_theme_color_override("font_color", text_primary)
-	add_child(title)
-
-	var subtitle = Label.new()
-	subtitle.text = "Modern Variant"
-	subtitle.position = Vector2(px + pad, L.title_y + int(26 * sc))
-	subtitle.add_theme_font_size_override("font_size", int(12 * sc))
-	subtitle.add_theme_color_override("font_color", text_secondary)
-	add_child(subtitle)
-
-	# --- Turn Counter ---
-	turn_counter_label = Label.new()
-	turn_counter_label.text = "Turn 1"
-	turn_counter_label.position = Vector2(px + pad, L.turn_card_y - int(24 * sc))
-	turn_counter_label.add_theme_font_size_override("font_size", int(14 * sc))
-	turn_counter_label.add_theme_color_override("font_color", text_secondary)
-	add_child(turn_counter_label)
-
-	# --- Turn Indicator Card ---
-	var card_h = int(44 * sc)
-	var turn_bg = Panel.new()
-	turn_bg.position = Vector2(px + pad, L.turn_card_y)
-	turn_bg.size = Vector2(L.graph_w, card_h)
-	var turn_bg_style = StyleBoxFlat.new()
-	turn_bg_style.bg_color = Color("#0f172a")
-	var r = int(8 * sc)
-	turn_bg_style.corner_radius_top_left = r
-	turn_bg_style.corner_radius_top_right = r
-	turn_bg_style.corner_radius_bottom_left = r
-	turn_bg_style.corner_radius_bottom_right = r
-	turn_bg_style.border_width_left = max(1, int(1 * sc))
-	turn_bg_style.border_width_right = max(1, int(1 * sc))
-	turn_bg_style.border_width_top = max(1, int(1 * sc))
-	turn_bg_style.border_width_bottom = max(1, int(1 * sc))
-	turn_bg_style.border_color = border_color
-	turn_bg.add_theme_stylebox_override("panel", turn_bg_style)
-	add_child(turn_bg)
-
-	turn_label = Label.new()
-	turn_label.text = "White's Turn"
-	turn_label.position = Vector2(px + pad + int(16 * sc), L.turn_card_y + int(10 * sc))
-	turn_label.add_theme_font_size_override("font_size", int(18 * sc))
-	turn_label.add_theme_color_override("font_color", white_color)
-	add_child(turn_label)
-
-	# Turn indicator dot
-	var dot_s = max(6, int(12 * sc))
-	var turn_dot = ColorRect.new()
-	turn_dot.position = Vector2(px + pad + L.graph_w - dot_s - int(8 * sc), L.turn_card_y + (card_h - dot_s) / 2)
-	turn_dot.size = Vector2(dot_s, dot_s)
-	turn_dot.color = white_color
-	add_child(turn_dot)
-
-	# --- Clocks (hidden unless the current game is timed) ---
-	white_clock_label = Label.new()
-	white_clock_label.text = "White: --:--"
-	white_clock_label.position = Vector2(px + pad, L.clock_y)
-	white_clock_label.add_theme_font_size_override("font_size", int(16 * sc))
-	white_clock_label.add_theme_color_override("font_color", white_color)
-	white_clock_label.visible = _clocks_visible
-	add_child(white_clock_label)
-
-	black_clock_label = Label.new()
-	black_clock_label.text = "Black: --:--"
-	black_clock_label.position = Vector2(px + pad + L.graph_w / 2, L.clock_y)
-	black_clock_label.add_theme_font_size_override("font_size", int(16 * sc))
-	black_clock_label.add_theme_color_override("font_color", black_color)
-	black_clock_label.visible = _clocks_visible
-	add_child(black_clock_label)
-
-	# --- Grace-period rings (unfill clockwise, one per side) ---
-	var ring_d = max(14, int(16 * sc))
-	white_grace_ring = GraceRing.new()
-	white_grace_ring.size = Vector2(ring_d, ring_d)
-	white_grace_ring.custom_minimum_size = Vector2(ring_d, ring_d)
-	white_grace_ring.position = Vector2(px + pad + int(92 * sc), L.clock_y + int(2 * sc))
-	white_grace_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	white_grace_ring.visible = false
-	add_child(white_grace_ring)
-
-	black_grace_ring = GraceRing.new()
-	black_grace_ring.size = Vector2(ring_d, ring_d)
-	black_grace_ring.custom_minimum_size = Vector2(ring_d, ring_d)
-	black_grace_ring.position = Vector2(px + pad + L.graph_w / 2 + int(92 * sc), L.clock_y + int(2 * sc))
-	black_grace_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	black_grace_ring.visible = false
-	add_child(black_grace_ring)
-
-	# --- Eval Label ---
-	eval_label = Label.new()
-	eval_label.text = "Eval: 0.0"
-	eval_label.position = Vector2(px + pad, L.eval_y)
-	eval_label.add_theme_font_size_override("font_size", int(14 * sc))
-	eval_label.add_theme_color_override("font_color", text_secondary)
-	add_child(eval_label)
-
-	# --- Players Info ---
-	players_label = Label.new()
-	players_label.text = ""
-	players_label.position = Vector2(px + pad, L.players_y)
-	players_label.add_theme_font_size_override("font_size", int(13 * sc))
-	players_label.add_theme_color_override("font_color", text_secondary)
-	add_child(players_label)
-
-	# --- Hint Toggle ---
-	hint_toggle = CheckButton.new()
-	hint_toggle.text = "Show Engine Move"
-	hint_toggle.position = Vector2(px + pad, L.hint_y)
-	hint_toggle.size = Vector2(L.graph_w, int(32 * sc))
-	hint_toggle.add_theme_font_size_override("font_size", int(13 * sc))
-	hint_toggle.add_theme_color_override("font_color", text_primary)
-	hint_toggle.toggled.connect(_on_hint_toggled)
-	add_child(hint_toggle)
-
-	# --- New Game Button ---
-	new_game_btn = Button.new()
-	new_game_btn.text = "New Game"
-	new_game_btn.position = Vector2(px + pad, L.new_game_y)
-	new_game_btn.size = Vector2(L.graph_w, int(44 * sc))
-	new_game_btn.add_theme_font_size_override("font_size", int(14 * sc))
-	new_game_btn.pressed.connect(_on_new_game)
-	_style_button(new_game_btn, accent_color, sc)
-	add_child(new_game_btn)
-
-	# --- Info Button ---
-	info_btn = Button.new()
-	info_btn.text = "Info"
-	info_btn.position = Vector2(px + pad, L.info_btn_y)
-	info_btn.size = Vector2(L.graph_w, int(36 * sc))
-	info_btn.add_theme_font_size_override("font_size", int(13 * sc))
-	info_btn.pressed.connect(_on_info_pressed)
-	_style_button(info_btn, Color("#475569"), sc)
-	add_child(info_btn)
-
-	# --- Clear Drawings Button ---
-	clear_drawings_btn = Button.new()
-	clear_drawings_btn.text = "Clear Drawings"
-	clear_drawings_btn.position = Vector2(px + pad, L.clear_drawings_y)
-	clear_drawings_btn.size = Vector2(L.graph_w, int(36 * sc))
-	clear_drawings_btn.add_theme_font_size_override("font_size", int(13 * sc))
-	clear_drawings_btn.pressed.connect(_on_clear_drawings_pressed)
-	_style_button(clear_drawings_btn, Color("#475569"), sc)
-	add_child(clear_drawings_btn)
-
-	# --- Status Label ---
-	status_label = Label.new()
-	status_label.text = ""
-	status_label.position = Vector2(px + pad, L.status_y)
-	status_label.add_theme_font_size_override("font_size", int(14 * sc))
-	status_label.add_theme_color_override("font_color", text_accent)
-	add_child(status_label)
-
-	# --- Eval Graph ---
-	_create_eval_graph_container()
-
-	# --- Bottom accent ---
-	var bar_h = max(1, int(2 * sc))
-	var bottom_bar = ColorRect.new()
-	bottom_bar.position = Vector2(px, ph - bar_h)
-	bottom_bar.size = Vector2(pw, bar_h)
-	bottom_bar.color = accent_color
+	bottom_bar = PlayerBar.new()
+	bottom_bar.build("black")
+	bottom_bar.position = Vector2(frame_x, BOARD_ORIGIN.y + BOARD_PX + FRAME + 10)
+	bottom_bar.size = Vector2(frame_w, BAR_H)
 	add_child(bottom_bar)
+	_assign_bars()
 
-# Eval graph state
-var eval_history = []
-var last_logged_eval = 999999.0
+	var side := UITheme.panel(UITheme.card(18))
+	side.position = SIDEBAR_RECT.position
+	side.size = SIDEBAR_RECT.size
+	add_child(side)
+	var col := UITheme.vbox(14)
+	side.add_child(col)
 
-func _create_eval_graph_container():
-	var L = _get_layout()
-	var gx = L.panel_x + L.pad
-	var gy = L.graph_y
-	var gw = L.graph_w
-	var gh = L.graph_h
-	var sc = L.scale
+	# Header
+	var header := UITheme.hbox(12)
+	col.add_child(header)
+	var icon := TextureRect.new()
+	icon.texture = load("res://icon.svg")
+	icon.custom_minimum_size = Vector2(46, 46)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	header.add_child(icon)
+	var titles := UITheme.vbox(0)
+	titles.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	header.add_child(titles)
+	titles.add_child(UITheme.label("Duel of the Seven Crowns", 19, UITheme.GOLD_LIGHT, UITheme.display(700)))
+	var turn_row := UITheme.hbox(8)
+	titles.add_child(turn_row)
+	turn_counter_label = UITheme.label("Turn 1", 13, UITheme.TEXT_DIM, UITheme.ui(600))
+	turn_row.add_child(turn_counter_label)
+	turn_row.add_child(UITheme.label("•", 13, UITheme.TEXT_FAINT))
+	turn_label = UITheme.label("White to move", 13, UITheme.TEXT, UITheme.ui(600))
+	turn_row.add_child(turn_label)
 
-	var title = Label.new()
-	title.text = "Evaluation History"
-	title.position = Vector2(gx, gy - int(22 * sc))
-	title.add_theme_font_size_override("font_size", int(12 * sc))
-	title.add_theme_color_override("font_color", Color("#94a3b8"))
-	title.name = "EvalGraphTitle"
-	add_child(title)
+	# Status line (check, game over, ...)
+	status_label = UITheme.label("", 14, UITheme.GOLD_LIGHT, UITheme.ui(600))
+	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	status_label.visible = false
+	col.add_child(status_label)
 
-	var bg = ColorRect.new()
-	bg.position = Vector2(gx, gy)
-	bg.size = Vector2(gw, gh)
-	bg.color = Color("#0f172a")
-	bg.name = "EvalGraphBg"
-	add_child(bg)
+	# Evaluation
+	col.add_child(UITheme.heading("Evaluation"))
+	var eval_row := UITheme.hbox(12)
+	col.add_child(eval_row)
+	_eval_bar = EvalBar.new()
+	_eval_bar.custom_minimum_size = Vector2(0, 14)
+	_eval_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_eval_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	eval_row.add_child(_eval_bar)
+	eval_label = UITheme.label("+0.00", 22, UITheme.TEXT, UITheme.ui(700))
+	eval_label.custom_minimum_size = Vector2(86, 0)
+	eval_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	eval_row.add_child(eval_label)
+	_eval_graph = EvalGraph.new()
+	_eval_graph.custom_minimum_size = Vector2(0, 104)
+	_eval_graph.cap = EVAL_GRAPH_CAP
+	_eval_graph.min_bound = EVAL_GRAPH_MIN_BOUND
+	col.add_child(_eval_graph)
 
-	var bw = max(1, int(1 * sc))
-	var borders = [
-		[Vector2(gx, gy), Vector2(gw, bw)],
-		[Vector2(gx, gy + gh - bw), Vector2(gw, bw)],
-		[Vector2(gx, gy), Vector2(bw, gh)],
-		[Vector2(gx + gw - bw, gy), Vector2(bw, gh)]
-	]
-	for i in range(borders.size()):
-		var b = borders[i]
-		var line = ColorRect.new()
-		line.position = b[0]
-		line.size = b[1]
-		line.color = Color("#334155")
-		line.name = "EvalBorder" + str(i)
-		add_child(line)
+	# Moves
+	col.add_child(UITheme.heading("Moves"))
+	var well := UITheme.panel(UITheme.box(UITheme.SURFACE_LO, 10, UITheme.BORDER_SOFT, 1, 10))
+	well.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(well)
+	_moves_scroll = ScrollContainer.new()
+	_moves_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	well.add_child(_moves_scroll)
+	_moves_grid = GridContainer.new()
+	_moves_grid.columns = 3
+	_moves_grid.add_theme_constant_override("h_separation", 14)
+	_moves_grid.add_theme_constant_override("v_separation", 4)
+	_moves_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_moves_scroll.add_child(_moves_grid)
 
-	var center = ColorRect.new()
-	center.position = Vector2(gx, gy + gh / 2)
-	center.size = Vector2(gw, bw)
-	center.color = Color("#334155")
-	center.name = "EvalCenterLine"
-	add_child(center)
+	# Hint toggle
+	hint_toggle = CheckButton.new()
+	hint_toggle.text = "Show best move"
+	hint_toggle.focus_mode = Control.FOCUS_NONE
+	hint_toggle.add_theme_font_override("font", UITheme.ui(600))
+	hint_toggle.add_theme_font_size_override("font_size", 14)
+	hint_toggle.add_theme_color_override("font_color", UITheme.TEXT_DIM)
+	hint_toggle.add_theme_color_override("font_hover_color", UITheme.TEXT)
+	hint_toggle.add_theme_color_override("font_pressed_color", UITheme.TEXT)
+	hint_toggle.add_theme_color_override("font_hover_pressed_color", UITheme.TEXT)
+	hint_toggle.toggled.connect(_on_hint_toggled)
+	col.add_child(hint_toggle)
 
-func _clear_eval_data():
-	var to_remove = []
-	for child in get_children():
-		var n = child.name
-		if n.begins_with("EvalLine") or n.begins_with("EvalDot") or n == "EvalScoreLabel" or n.begins_with("EvalBound") or n == "EvalPlaceholder":
-			to_remove.append(child)
-	for child in to_remove:
-		remove_child(child)
-		child.free()
+	# Buttons
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 8)
+	col.add_child(grid)
+	flip_btn = UITheme.button("Flip board", "secondary", 14, 38)
+	flip_btn.tooltip_text = "Turn the board around (F)"
+	flip_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	flip_btn.pressed.connect(_on_flip_pressed)
+	grid.add_child(flip_btn)
+	clear_drawings_btn = UITheme.button("Clear arrows", "secondary", 14, 38)
+	clear_drawings_btn.tooltip_text = "Remove right-click arrows (C)"
+	clear_drawings_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	clear_drawings_btn.pressed.connect(_on_clear_drawings_pressed)
+	grid.add_child(clear_drawings_btn)
+	info_btn = UITheme.button("Pieces", "secondary", 14, 38)
+	info_btn.tooltip_text = "How every piece moves (I)"
+	info_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	info_btn.pressed.connect(_on_info_pressed)
+	grid.add_child(info_btn)
+	new_game_btn = UITheme.button("New game", "primary", 16, 44)
+	new_game_btn.pressed.connect(_on_new_game)
+	col.add_child(new_game_btn)
 
-func _update_eval_graph(current_score: float):
-	_clear_eval_data()
 
-	var L = _get_layout()
-	var gx = L.panel_x + L.pad
-	var gy = L.graph_y
-	var gw = L.graph_w
-	var gh = L.graph_h
-	var gm = L.graph_margin
-	var sc = L.scale
+# Which bar shows which colour: the side at the bottom of the board gets the
+# bottom bar. Unflipped, White's back rank is drawn at the top.
+func _assign_bars():
+	var bottom_color := "white" if _flipped else "black"
+	var top_color := "black" if _flipped else "white"
+	_bars = {bottom_color: bottom_bar, top_color: top_bar}
+	for c in ["white", "black"]:
+		var bar: PlayerBar = _bars[c]
+		bar.color = c
+		var tok := UITheme.piece_token(("w" if c == "white" else "b") + "K", 38)
+		tok.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		var row = bar.token_holder.get_parent()
+		var idx = bar.token_holder.get_index()
+		bar.token_holder.queue_free()
+		row.add_child(tok)
+		row.move_child(tok, idx)
+		bar.token_holder = tok
+	_refresh_bar_texts()
 
-	var score_label = Label.new()
-	score_label.text = "%+.1f" % current_score
-	score_label.position = Vector2(gx + gw / 2 - int(25 * sc), gy + gh + int(4 * sc))
-	score_label.add_theme_font_size_override("font_size", int(14 * sc))
-	score_label.add_theme_color_override("font_color", Color("#e2e8f0"))
-	score_label.name = "EvalScoreLabel"
-	add_child(score_label)
 
-	var CAP = 5000.0
-	var capped = []
-	for entry in eval_history:
-		var s = entry[1]
-		if typeof(s) == TYPE_STRING and s.begins_with("M"):
-			var m = int(s.substr(1))
-			capped.append(CAP if m > 0 else -CAP)
-		else:
-			capped.append(clampf(float(s), -CAP, CAP))
+func set_orientation(flipped: bool):
+	_flipped = flipped
+	if board_drawer != null:
+		board_drawer.set_flipped(flipped)
+	_assign_bars()
+	_refresh_dynamic()
 
-	var max_abs = 0.0
-	for s in capped:
-		max_abs = maxf(max_abs, abs(s))
-	var bound = maxf(max_abs, 200.0)
 
-	var top_label = Label.new()
-	top_label.text = "+%d" % int(bound)
-	top_label.position = Vector2(gx + int(4 * sc), gy + int(4 * sc))
-	top_label.add_theme_font_size_override("font_size", int(9 * sc))
-	top_label.add_theme_color_override("font_color", Color("#475569"))
-	top_label.name = "EvalBoundTop"
-	add_child(top_label)
-
-	var bot_label = Label.new()
-	bot_label.text = "-%d" % int(bound)
-	bot_label.position = Vector2(gx + int(4 * sc), gy + gh - int(14 * sc))
-	bot_label.add_theme_font_size_override("font_size", int(9 * sc))
-	bot_label.add_theme_color_override("font_color", Color("#475569"))
-	bot_label.name = "EvalBoundBot"
-	add_child(bot_label)
-
-	var n = capped.size()
-	var step_x = float(gw - 2 * gm) / maxf(n - 1, 1)
-	var left = gx + gm
-	var usable_h = gh - 2 * gm
-	var cy = gy + gh / 2
-
-	var points = []
-	for i in range(n):
-		var x = left + i * step_x
-		var ratio = clampf(capped[i] / bound, -1.0, 1.0)
-		var y = cy - ratio * (usable_h / 2)
-		points.append(Vector2(x, y))
-
-	var lw = max(1, int(2 * sc))
-	for i in range(points.size() - 1):
-		var line = Line2D.new()
-		line.add_point(points[i])
-		line.add_point(points[i + 1])
-		line.width = lw
-		var mid_y = (points[i].y + points[i + 1].y) / 2
-		line.default_color = white_color if mid_y < cy else Color("#94a3b8")
-		line.name = "EvalLine" + str(i)
-		add_child(line)
-
-	var ds = max(2, int(4 * sc))
-	for i in range(points.size()):
-		var p = points[i]
-		var dot = ColorRect.new()
-		dot.position = Vector2(p.x - ds / 2, p.y - ds / 2)
-		dot.size = Vector2(ds, ds)
-		dot.color = Color("#e2e8f0")
-		dot.name = "EvalDot" + str(i)
-		add_child(dot)
-
-func _style_button(btn: Button, color: Color, sc: float):
-	var r = int(8 * sc)
-	var normal = StyleBoxFlat.new()
-	normal.bg_color = color
-	normal.corner_radius_top_left = r
-	normal.corner_radius_top_right = r
-	normal.corner_radius_bottom_left = r
-	normal.corner_radius_bottom_right = r
-	btn.add_theme_stylebox_override("normal", normal)
-
-	var hover = StyleBoxFlat.new()
-	hover.bg_color = color.lightened(0.15)
-	hover.corner_radius_top_left = r
-	hover.corner_radius_top_right = r
-	hover.corner_radius_bottom_left = r
-	hover.corner_radius_bottom_right = r
-	btn.add_theme_stylebox_override("hover", hover)
-
-	var pressed = StyleBoxFlat.new()
-	pressed.bg_color = color.darkened(0.15)
-	pressed.corner_radius_top_left = r
-	pressed.corner_radius_top_right = r
-	pressed.corner_radius_bottom_left = r
-	pressed.corner_radius_bottom_right = r
-	btn.add_theme_stylebox_override("pressed", pressed)
+# ---------------------------------------------------------------------------
+# Players / clocks
+# ---------------------------------------------------------------------------
+const LEVELS := ["beginner", "novice", "easy", "medium", "hard", "expert", "impossible"]
 
 func _bot_label(type: String) -> String:
-	match type:
-		"human":
-			return "Human"
-		"easy":
-			return "Easy Bot"
-		"medium":
-			return "Medium Bot"
-		"hard":
-			return "Hard Bot"
-		"impossible":
-			return "Impossible Bot"
-		"roulette":
-			return "Roulette Bot"
-	return type.capitalize()
+	if type == "human":
+		return "Human"
+	return type.capitalize() + " Bot"
+
+func _bot_sub(type: String) -> String:
+	if type == "human":
+		return "Human player"
+	var lvl := LEVELS.find(type)
+	if lvl >= 0:
+		return "Computer  ·  Level %d of 7" % (lvl + 1)
+	return "Computer  ·  Personality"
 
 func set_player_labels(white: String, black: String):
-	var w_label = _bot_label(white)
-	var b_label = _bot_label(black)
-	players_label.text = "White: %s\nBlack: %s" % [w_label, b_label]
+	_player_types = {"white": white, "black": black}
+	_refresh_bar_texts()
 
-# ------------------------------------------------------------------
-# CLOCK DISPLAY API — called by StartGameplay
-# ------------------------------------------------------------------
+func _refresh_bar_texts():
+	for c in ["white", "black"]:
+		var bar: PlayerBar = _bars[c]
+		var t: String = _player_types[c]
+		var human_count := int(_player_types.white == "human") + int(_player_types.black == "human")
+		var nm := _bot_label(t)
+		if t == "human" and human_count == 1:
+			nm = "You"
+		elif t == "human":
+			nm = c.capitalize()
+		bar.name_label.text = nm
+		var lvl := LEVELS.find(t)
+		bar.sub_label.text = _bot_sub(t)
+		bar.sub_label.add_theme_color_override("font_color", UITheme.LEVEL_COLORS[lvl] if lvl >= 0 else UITheme.TEXT_DIM)
+		bar.clock_panel.visible = _clocks_visible
+		bar.set_thinking(false)
+
 func set_clocks_visible(vis: bool):
 	_clocks_visible = vis
-	if white_clock_label != null:
-		white_clock_label.visible = vis
-	if black_clock_label != null:
-		black_clock_label.visible = vis
-	if not vis:
-		if white_grace_ring != null:
-			white_grace_ring.visible = false
-		if black_grace_ring != null:
-			black_grace_ring.visible = false
+	for bar in [top_bar, bottom_bar]:
+		bar.clock_panel.visible = vis
+		if not vis:
+			bar.grace.visible = false
 
 func update_clocks(white_seconds: float, black_seconds: float):
-	_last_white_time = white_seconds
-	_last_black_time = black_seconds
-	if white_clock_label != null:
-		white_clock_label.text = "White: " + _format_clock(white_seconds)
-		white_clock_label.add_theme_color_override("font_color", _clock_color(white_seconds, white_color))
-	if black_clock_label != null:
-		black_clock_label.text = "Black: " + _format_clock(black_seconds)
-		black_clock_label.add_theme_color_override("font_color", _clock_color(black_seconds, black_color))
+	_set_clock(_bars["white"], white_seconds)
+	_set_clock(_bars["black"], black_seconds)
 
-# Called every frame while a timed game is in progress. active_side is
-# whichever color is currently on move; remaining/total describe the
-# per-turn grace buffer (GameState.turn_grace_remaining / TURN_GRACE_PERIOD).
-# Only the side on move ever shows a ring — the waiting side's buffer
-# isn't running.
+func _set_clock(bar: PlayerBar, seconds: float):
+	bar.clock_label.text = _format_clock(seconds)
+	if seconds <= CLOCK_DANGER_SECONDS:
+		bar.clock_label.add_theme_color_override("font_color", UITheme.RUBY if not bar._active else Color("#5c0a18"))
+	elif seconds <= CLOCK_WARN_SECONDS:
+		bar.clock_label.add_theme_color_override("font_color", UITheme.AMBER if not bar._active else Color("#5a3300"))
+
+# Per-turn grace buffer ring, shown only on the side to move.
 func update_grace(active_side: String, remaining: float, total: float):
 	if not _clocks_visible:
 		return
 	var frac = 0.0 if total <= 0.0 else remaining / total
-	var showing = remaining > 0.0
-	if active_side == "white":
-		if white_grace_ring != null:
-			white_grace_ring.visible = showing
-			white_grace_ring.set_fraction(frac)
-		if black_grace_ring != null:
-			black_grace_ring.visible = false
-	else:
-		if black_grace_ring != null:
-			black_grace_ring.visible = showing
-			black_grace_ring.set_fraction(frac)
-		if white_grace_ring != null:
-			white_grace_ring.visible = false
-
-func _clock_color(seconds: float, base_color: Color) -> Color:
-	if seconds <= CLOCK_DANGER_SECONDS:
-		return clock_danger_color
-	elif seconds <= CLOCK_WARN_SECONDS:
-		return clock_warn_color
-	return base_color
+	for c in ["white", "black"]:
+		var bar: PlayerBar = _bars[c]
+		bar.grace.visible = (c == active_side) and remaining > 0.0
+		if c == active_side:
+			bar.grace.set_fraction(frac)
 
 func _format_clock(seconds: float) -> String:
 	var s = max(0, int(ceil(seconds)))
-	var m = s / 60
-	var rem = s % 60
-	return "%d:%02d" % [m, rem]
+	return "%d:%02d" % [s / 60, s % 60]
+
+
+# ---------------------------------------------------------------------------
+# Turn / eval / moves
+# ---------------------------------------------------------------------------
+func update_turn(turn: String):
+	turn_label.text = turn.capitalize() + " to move"
+	for c in ["white", "black"]:
+		_bars[c].set_active(c == turn)
+	var game_state = get_parent().get_node("GameState")
+	if game_state.clock_enabled:
+		update_clocks(game_state.white_time_remaining, game_state.black_time_remaining)
+	update_eval(game_state.current_eval_score, true, game_state.current_eval_mate)
+	_refresh_dynamic()
+
+func _refresh_dynamic():
+	var game_state = get_parent().get_node_or_null("GameState")
+	if game_state == null:
+		return
+	for c in ["white", "black"]:
+		_bars[c].set_active(c == game_state.turn and not game_state.game_over)
+	_refresh_moves(game_state.move_history)
+	_refresh_captured(game_state.board)
+	if game_state.engine != null and not game_state.game_over and game_state.engine.is_in_check(game_state.turn):
+		_set_status("%s is in check" % game_state.turn.capitalize(), UITheme.RUBY)
+	elif not game_state.game_over:
+		_set_status("", UITheme.TEXT)
+
+func _set_status(text: String, color: Color):
+	status_label.text = text
+	status_label.add_theme_color_override("font_color", color)
+	status_label.visible = text != ""
+
+# eval_score: White-relative centipawns from the engine.
+# mate: White-relative mate string from the engine ("M3", "-M2", "M0" for a
+#       finished game), or "" when there is no forced mate.
+func update_eval(eval_score, is_new_move: bool = false, mate: String = ""):
+	var numeric_score: float
+	var text: String
+	if mate != "":
+		var black_mates = mate.begins_with("-")
+		numeric_score = -EVAL_GRAPH_CAP if black_mates else EVAL_GRAPH_CAP
+		if mate.ends_with("M0"):
+			text = "0-1" if black_mates else "1-0"
+		else:
+			text = mate
+	else:
+		numeric_score = float(eval_score) / 100.0
+		text = "%+.2f" % numeric_score
+
+	eval_label.text = text
+	eval_label.add_theme_color_override("font_color", UITheme.GOLD_LIGHT if mate != "" else UITheme.TEXT)
+
+	if is_new_move or eval_history.is_empty():
+		eval_history.append([eval_history.size(), numeric_score])
+	else:
+		eval_history[eval_history.size() - 1][1] = numeric_score
+	last_logged_eval = numeric_score
+	last_logged_label = text
+
+	_eval_bar.value = numeric_score
+	_eval_bar.queue_redraw()
+	var pts: Array = []
+	for e in eval_history:
+		pts.append(float(e[1]))
+	_eval_graph.points = pts
+	_eval_graph.queue_redraw()
+
+func _refresh_moves(history: Array):
+	for ch in _moves_grid.get_children():
+		ch.queue_free()
+	var i := 0
+	while i < history.size():
+		var num := UITheme.label("%d." % (i / 2 + 1), 13, UITheme.TEXT_FAINT, UITheme.ui(600))
+		num.custom_minimum_size = Vector2(30, 0)
+		_moves_grid.add_child(num)
+		for k in 2:
+			var txt: String = history[i + k] if i + k < history.size() else ""
+			var latest := i + k == history.size() - 1
+			var l := UITheme.label(txt, 14, UITheme.GOLD_LIGHT if latest else UITheme.TEXT, UITheme.ui(600 if latest else 500))
+			l.custom_minimum_size = Vector2(130, 0)
+			_moves_grid.add_child(l)
+		i += 2
+	await get_tree().process_frame
+	_moves_scroll.scroll_vertical = int(_moves_scroll.get_v_scroll_bar().max_value)
+
+# Pieces each side has captured (shown on the capturer's bar).
+func _refresh_captured(board: Array):
+	var counts := {"w": {}, "b": {}}
+	for r in board:
+		for p in r:
+			if p != "":
+				counts[p[0]][p[1]] = counts[p[0]].get(p[1], 0) + 1
+	for side in ["w", "b"]:
+		var lost: Array = []
+		var have: Dictionary = counts[side]
+		for t in PIECE_ORDER:
+			var start: int = START_COUNTS.get(t, 0)
+			var now: int = have.get(t, 0)
+			if t == "D":
+				now += have.get("L", 0)  # promoted donkeys aren't captured
+			if t == "L":
+				continue
+			for k in max(0, start - now):
+				lost.append(_png_name(t))
+		var capturer := "black" if side == "w" else "white"
+		_bars[capturer].set_captured(lost)
+
+func _png_name(t: String) -> String:
+	return {"K": "king", "N": "knight", "C": "cardinal", "P": "paladin", "M": "marshal", "D": "donkey", "L": "lancer", "W": "warden"}[t]
+
+
+# ---------------------------------------------------------------------------
+# Game over card (drawn over the board)
+# ---------------------------------------------------------------------------
+func show_game_over(reason: String, winner: String):
+	var title := "Game over"
+	var sub := ""
+	match reason:
+		"checkmate":
+			title = "Checkmate"
+			sub = winner + " wins"
+		"no_legal_moves":
+			title = winner + " wins"
+			sub = "No legal moves left"
+		"time":
+			title = winner + " wins"
+			sub = "on time"
+		"40move":
+			title = "Draw"
+			sub = "40 moves without a capture"
+		"repetition":
+			title = "Draw"
+			sub = "Threefold repetition"
+		"insufficient":
+			title = "Draw"
+			sub = "Insufficient material"
+	if reason in ["40move", "repetition", "insufficient"] and winner != "":
+		sub += "\n" + winner + " wins on Armageddon rules"
+	_set_status(title + (" — " + sub.replace("\n", " · ") if sub != "" else ""), UITheme.GOLD_LIGHT)
+	for c in ["white", "black"]:
+		_bars[c].set_active(false)
+		_bars[c].set_thinking(false)
+	_show_game_over_card(title, sub, winner)
+
+func _show_game_over_card(title: String, sub: String, winner: String):
+	_hide_game_over_card()
+	var layer_ctl := Control.new()
+	layer_ctl.position = BOARD_ORIGIN
+	layer_ctl.size = Vector2(BOARD_PX, BOARD_PX)
+	layer_ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(layer_ctl)
+	_game_over_layer = layer_ctl
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer_ctl.add_child(center)
+	var st := UITheme.box(Color(UITheme.SURFACE, 0.97), 16, UITheme.GOLD, 2, 26)
+	st.shadow_color = Color(0, 0, 0, 0.5)
+	st.shadow_size = 24
+	var card := UITheme.panel(st)
+	card.custom_minimum_size = Vector2(340, 0)
+	center.add_child(card)
+	var v := UITheme.vbox(12)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	card.add_child(v)
+	if winner != "":
+		var tok := UITheme.piece_token(("w" if winner == "White" else "b") + "K", 56)
+		tok.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		v.add_child(tok)
+	var t := UITheme.label(title, 34, UITheme.GOLD_LIGHT, UITheme.display(700))
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	v.add_child(t)
+	if sub != "":
+		var s := UITheme.label(sub, 16, UITheme.TEXT_DIM, UITheme.ui(500))
+		s.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		v.add_child(s)
+	var row := UITheme.hbox(10)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_child(row)
+	var view := UITheme.button("View board", "ghost", 14, 40)
+	view.custom_minimum_size.x = 130
+	view.pressed.connect(_hide_game_over_card)
+	row.add_child(view)
+	var again := UITheme.button("New game", "primary", 15, 40)
+	again.custom_minimum_size.x = 130
+	again.pressed.connect(_on_new_game)
+	row.add_child(again)
+
+func _hide_game_over_card():
+	if _game_over_layer != null:
+		_game_over_layer.queue_free()
+		_game_over_layer = null
+
+
+# ---------------------------------------------------------------------------
+# Signals / buttons
+# ---------------------------------------------------------------------------
+func _on_turn_changed(new_turn: String):
+	# new_turn == "white" means Black just moved, i.e. a new full turn starts.
+	if new_turn == "white":
+		turn_number += 1
+	turn_counter_label.text = "Turn %d" % turn_number
+	update_turn(new_turn)
+
+func _on_game_ended(reason: String, winner: String):
+	show_game_over(reason, winner)
+
+func _on_thinking():
+	var game_state = get_parent().get_node("GameState")
+	_bars[game_state.turn].set_thinking(true)
+
+func _on_thinking_done():
+	for c in ["white", "black"]:
+		_bars[c].set_thinking(false)
 
 func _on_hint_toggled(enabled: bool):
 	var root = get_parent()
@@ -613,84 +708,8 @@ func _on_hint_toggled(enabled: bool):
 	else:
 		game_state.stop_hint_search()
 
-func _normalize_mate_score(raw_score) -> String:
-	var f = float(raw_score)
-	if f > 100000.0:
-		var mate_in = max(1, int(round(999999.0 - f)))
-		return "M%d" % mate_in
-	elif f < -100000.0:
-		var mate_in = max(1, int(round(999999.0 + f)))
-		return "-M%d" % mate_in
-	return str(raw_score)
-
-
-func update_turn(turn: String):
-	turn_label.text = turn.capitalize() + "'s Turn"
-	turn_label.add_theme_color_override("font_color", white_color if turn == "white" else black_color)
-	var game_state = get_parent().get_node("GameState")
-	update_eval(game_state.current_eval_score, true)
-
-func update_eval(eval_score, is_new_move: bool = false):
-	var normalized = _normalize_mate_score(eval_score)
-	var numeric_score: float
-	
-	if normalized.begins_with("-M"):
-		var mate_in = int(normalized.substr(2))
-		eval_label.text = "Eval: -M%d" % mate_in
-		numeric_score = -10000.0
-	elif normalized.begins_with("M"):
-		var mate_in = int(normalized.substr(1))
-		eval_label.text = "Eval: M%d" % mate_in
-		numeric_score = 10000.0
-	else:
-		numeric_score = float(normalized)
-		eval_label.text = "Eval: %+.1f" % numeric_score
-	
-	if is_new_move or eval_history.is_empty():
-		eval_history.append([eval_history.size(), numeric_score])
-	else:
-		eval_history[eval_history.size() - 1][1] = numeric_score
-	
-	last_logged_eval = numeric_score
-	_update_eval_graph(numeric_score)
-
-func show_game_over(reason: String, winner: String):
-	match reason:
-		"checkmate":
-			status_label.text = "Checkmate! " + winner + " wins!"
-		"40move":
-			if winner != "":
-				status_label.text = "Draw (40 moves without capture) — " + winner + " wins on Armageddon rules!"
-			else:
-				status_label.text = "Draw! (40 moves without capture)"
-		"insufficient":
-			if winner != "":
-				status_label.text = "Draw (insufficient material) — " + winner + " wins on Armageddon rules!"
-			else:
-				status_label.text = "Draw! (Insufficient material)"
-		"no_legal_moves":
-			status_label.text = winner + " wins! (No legal moves)"
-		"time":
-			status_label.text = winner + " wins on time!"
-
-func _on_turn_changed(new_turn: String):
-	update_turn(new_turn)
-	# turn_changed fires right after a move flips the turn. new_turn == "white"
-	# means Black just moved (turn flipped black -> white), which is the
-	# correct moment a new turn begins. new_turn == "black" means White just
-	# moved and Black hasn't played yet -- must NOT increment there.
-	if new_turn == "white":
-		turn_number += 1
-	turn_counter_label.text = "Turn %d" % turn_number
-
-func _on_game_ended(reason: String, winner: String):
-	show_game_over(reason, winner)
-
-func _on_thinking():
-	status_label.text = "Thinking..."
-
-func _on_thinking_done():
-	status_label.text = ""
+func _on_flip_pressed():
+	get_parent().toggle_flip()
 
 func _on_info_pressed():
 	var info = get_parent().get_node_or_null("Info")
@@ -701,13 +720,21 @@ func _on_clear_drawings_pressed():
 	if board_drawer != null:
 		board_drawer.clear_arrows()
 
-func _on_new_game():
+# Called by StartGameplay when a game starts.
+func reset_for_new_game():
 	turn_number = 1
 	turn_counter_label.text = "Turn 1"
-	status_label.text = ""
+	turn_label.text = "White to move"
+	_set_status("", UITheme.TEXT)
 	eval_history.clear()
 	last_logged_eval = 999999.0
-	set_clocks_visible(false)
+	last_logged_label = ""
+	_hide_game_over_card()
 	if board_drawer != null:
 		board_drawer.clear_arrows()
+	_refresh_dynamic()
+
+func _on_new_game():
+	reset_for_new_game()
+	set_clocks_visible(false)
 	get_parent().new_game()

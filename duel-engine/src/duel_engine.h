@@ -17,6 +17,28 @@
 //    scores exceeding ±MATE_SCORE (impossible from correct search output) and the engine
 //    permanently latching onto a depth-1 phantom "mate" for the rest of a game.
 
+//
+// v2.3 (search correctness / mate finding):
+//  - Timeouts no longer poison the TT: a node cut short by the clock returns 0
+//    and never stores (it used to return the -MATE sentinel, which the parent
+//    read as "I mate", then stored as a mate). Same fix in quiescence.
+//  - LMP: shallow depth only, counted over quiet moves, never prunes checks
+//    (was ~2 moves searched at depth 1, so quiet mating moves were dropped).
+//  - Razoring now verified by qsearch instead of returning it unconditionally.
+//  - Real IID (reduced search for a TT move, then full depth) instead of
+//    silently shortening every node without a TT move.
+//  - Quiet checks at the first qsearch ply, so mates at the horizon are seen.
+//  - Iterative deepening only stops on a mate once depth covers its length
+//    (used to stop on the first, possibly slower, mate found).
+//  - Null-move never returns a mate score; king_danger capped (KING_DANGER_CAP).
+//  - New score_moves() API: per-move shallow search scores for bot ranking.
+//  - 40-move clock resets only on captures and promotions (matches the game;
+//    plain donkey moves used to reset it inside the search).
+//  - Threefold repetition: the game passes the position keys since the last
+//    capture/promotion (set_repetition_history); the search scores any
+//    repetition of a game position or of a position earlier in the line as a
+//    draw, so the engine avoids repeating when ahead and seeks it when behind.
+
 #ifndef DUEL_ENGINE_H
 #define DUEL_ENGINE_H
 
@@ -286,6 +308,7 @@ private:
     static constexpr float KING_DANGER_SCALE_EG = 0.25f;
     static constexpr int TROPISM_WEIGHTS[10] = {0, 0, 0, 6, 8, 8, 9, 2, 7, 7};
     static constexpr int TEMPO_BONUS = 25;
+    static constexpr int KING_DANGER_CAP = 600;
 
     static inline int lerp(int mg, int eg, float phase)
     {
@@ -315,6 +338,10 @@ struct ThreadData
     uint32_t countermoves[10][49]{};
     int16_t cont_history[10][49][49][49]{};
     int static_eval_stack[MAX_PLY + 4]{};
+    // fb.history index of the first move after the most recent null move on
+    // the current search path (0 = none). Repetition scans stop here, since
+    // a "repetition" through a pass isn't a real one.
+    int null_barrier{0};
 
     // History gravity: right-shift all history values every GRAVITY_INTERVAL
     // nodes to prevent saturation and age out stale information.
@@ -351,10 +378,29 @@ public:
     int evaluate_board(const FastBoard &fb, int halfmove_clock);
     void clear_tables();
 
+    // Scores EVERY legal root move with its own full-window search of the
+    // given depth (side-to-move relative, centipawns / mate scores).
+    // Single-threaded, meant for small depths (2-4). Used by the bots to rank
+    // candidate moves tactically instead of by static eval. Moves whose search
+    // didn't finish before the time limit are omitted.
+    // Zobrist keys (FastBoard::zhash) of earlier game positions since the last
+    // capture/promotion, oldest first, NOT including the current position.
+    // Set before searching; read-only while a search runs.
+    void set_game_history(std::vector<uint64_t> keys) { game_keys = std::move(keys); }
+
+    std::vector<std::pair<uint32_t, int>> score_root_moves(const FastBoard &fb, int depth,
+                                                           double time_limit_sec,
+                                                           int halfmove_clock);
+
 private:
     static constexpr int NO_EVAL = 1'000'000;
 
     int tt_age{0};
+    std::vector<uint64_t> game_keys;
+
+    // True if fb's current position already occurred on the search path (since
+    // the last irreversible move / null move) or earlier in the game.
+    bool is_repetition(const FastBoard &fb, const ThreadData &td) const;
 
     // Shared across all threads — atomic for correctness, relaxed for speed
     std::atomic<bool> timed_out{false};
@@ -375,8 +421,10 @@ private:
                     int wp, int bp,
                     std::vector<uint32_t> root_moves); // pre-rotated root order
 
+    // qply = plies already spent inside quiescence; quiet checks are only
+    // generated at qply == 0.
     int quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm,
-                   ThreadData &td);
+                   ThreadData &td, int qply = 0);
 
     int negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
                 bool allow_null, int wp, int bp, int extensions, int hm,
@@ -414,6 +462,11 @@ public:
 
     void set_board(const Array &board_array, const String &turn);
     Dictionary find_best_move(int max_depth, double time_limit, int halfmove_clock, int num_threads = -1);
+    Array score_moves(int depth, double time_limit, int halfmove_clock);
+    // Repetition support: key of the current board (as set by set_board), and
+    // the keys of earlier positions since the last capture/promotion.
+    int64_t get_position_key();
+    void set_repetition_history(const Array &keys);
     int get_recommended_threads();
     float evaluate_position(int halfmove_clock);
     Array get_legal_moves(int row, int col);

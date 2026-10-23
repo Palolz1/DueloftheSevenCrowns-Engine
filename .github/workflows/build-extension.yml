@@ -77,9 +77,79 @@ jobs:
             !duel-engine/demo/bin/*.pdb
           if-no-files-found: error
 
+  # Fairy-Stockfish (GPL-3, github.com/fairy-stockfish/Fairy-Stockfish) is the
+  # search engine the game talks to over UCI. Pinned to a known-good commit:
+  # older releases lack promotionPawnTypes / nMoveRuleTypes, which the
+  # sevencrowns variant (duel-engine/demo/fsf/sevencrowns.ini) needs.
+  # Output is cached per commit, so unchanged binaries aren't re-committed.
+  fairy-stockfish:
+    name: fairy-stockfish-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    env:
+      FSF_COMMIT: 9f778da667f6e07dae1e85d3e2ea204fc6dee94d
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows   # cross-compiled with MinGW, fully static
+            os: ubuntu-latest
+          - name: linux
+            os: ubuntu-latest
+          - name: macos     # universal binary: Apple Silicon + Intel
+            os: macos-latest
+    steps:
+      - name: Cache build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: fsf-out
+          key: fsf-${{ matrix.name }}-9f778da667f6e07dae1e85d3e2ea204fc6dee94d-v1
+
+      - name: Check out Fairy-Stockfish
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: fairy-stockfish/Fairy-Stockfish
+          ref: ${{ env.FSF_COMMIT }}
+          path: fsf-src
+
+      - name: Build (windows)
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'windows'
+        working-directory: fsf-src/src
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-mingw-w64-x86-64-posix
+          make -j4 build ARCH=x86-64-modern COMP=mingw CXX=x86_64-w64-mingw32-g++-posix EXTRALDFLAGS="-static"
+          mkdir -p ../../fsf-out && cp stockfish.exe ../../fsf-out/fairy-stockfish-windows.exe
+
+      - name: Build (linux)
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'linux'
+        working-directory: fsf-src/src
+        run: |
+          make -j4 build ARCH=x86-64-modern
+          mkdir -p ../../fsf-out && cp stockfish ../../fsf-out/fairy-stockfish-linux
+
+      - name: Build (macos, universal)
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'macos'
+        working-directory: fsf-src/src
+        run: |
+          make -j4 build ARCH=apple-silicon && mv stockfish ../sf-arm64
+          make clean
+          make -j4 build ARCH=x86-64-modern && mv stockfish ../sf-x86_64
+          mkdir -p ../../fsf-out
+          lipo -create -output ../../fsf-out/fairy-stockfish-macos ../sf-arm64 ../sf-x86_64
+          codesign --force --sign - ../../fsf-out/fairy-stockfish-macos
+          lipo -info ../../fsf-out/fairy-stockfish-macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsf-${{ matrix.name }}
+          path: fsf-out/*
+          if-no-files-found: error
+
   commit-binaries:
     name: Commit built binaries
-    needs: build
+    needs: [build, fairy-stockfish]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
@@ -92,6 +162,16 @@ jobs:
           pattern: duelengine-*
           path: duel-engine/demo/bin
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fsf-*
+          path: duel-engine/demo/fsf
+          merge-multiple: true
+
+      - name: Mark Fairy-Stockfish binaries executable
+        run: |
+          chmod +x duel-engine/demo/fsf/fairy-stockfish-linux duel-engine/demo/fsf/fairy-stockfish-macos
 
       - name: Report downloaded binaries
         run: |
@@ -109,12 +189,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add duel-engine/demo/bin
-          git status --porcelain -- duel-engine/demo/bin
+          git add duel-engine/demo/bin duel-engine/demo/fsf
+          git status --porcelain -- duel-engine/demo/bin duel-engine/demo/fsf
           if git diff --cached --quiet; then
             echo "::notice::No binary changes to commit"
           else
-            echo "::notice::Committing changed binaries: $(git diff --cached --name-only -- duel-engine/demo/bin | tr '\n' ' ')"
-            git commit -m "ci: update DuelEngine extension binaries [skip ci]"
+            echo "::notice::Committing changed binaries: $(git diff --cached --name-only -- duel-engine/demo/bin duel-engine/demo/fsf | tr '\n' ' ')"
+            git commit -m "ci: update DuelEngine + Fairy-Stockfish binaries [skip ci]"
             git push
           fi

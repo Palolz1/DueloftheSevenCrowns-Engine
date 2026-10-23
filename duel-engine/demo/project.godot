@@ -26,8 +26,10 @@ SFXhandler="*uid://bkb4sftdkrm4"
 
 [display]
 
-window/size/viewport_width=1000
-window/size/viewport_height=650
+window/size/viewport_width=1280
+window/size/viewport_height=800
+window/size/window_width_override=1152
+window/size/window_height_override=720
 window/stretch/mode="canvas_items"
 
 [physics]
@@ -35,6 +37,8 @@ window/stretch/mode="canvas_items"
 3d/physics_engine="Jolt Physics"
 
 [rendering]
+
+environment/defaults/default_clear_color=Color(0.039, 0.055, 0.098, 1)
 
 rendering_device/driver.windows="d3d12"
 textures/vram_compression/import_etc2_astc=true

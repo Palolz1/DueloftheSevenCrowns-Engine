@@ -1,379 +1,403 @@
 #PlayerSetup.gd
+# New-game screen: who plays each side (a human or a computer level /
+# personality) and the time control.
 extends Control
 
 signal players_selected(white_type: String, black_type: String, game_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float)
 
-var white_type: String = "human"
-var black_type: String = "human"
-var game_type: String = "untimed"
+# Choices survive "New game" (the screen is rebuilt each time).
+static var _saved := {
+	"white": "human", "black": "medium",
+	"white_bot": "medium", "black_bot": "medium",
+	"game_type": "untimed", "standard": 15.0, "arma_white": 10.0, "arma_black": 8.0,
+}
 
-# Editable time controls (minutes). Defaults match the classic presets.
+var white_type: String = "human"
+var black_type: String = "medium"
+var game_type: String = "untimed"
 var standard_minutes: float = 15.0
 var armageddon_white_minutes: float = 10.0
 var armageddon_black_minutes: float = 8.0
 
-var _standard_spin: SpinBox
-var _arma_white_spin: SpinBox
-var _arma_black_spin: SpinBox
-var _standard_row: HBoxContainer
-var _arma_row: VBoxContainer
-
-# ------------------------------------------------------------------
-# CONFIGURATION — add new bots here and the UI adapts automatically
-# ------------------------------------------------------------------
-const OPTIONS: Array[Dictionary] = [
-	{ "id": "human",      "label": "Human",          "desc": "You control",        "accent": Color("#22c55e") },
-	{ "id": "beginner",   "label": "Beginner Bot",   "desc": "Very passive AI",    "accent": Color("#86efac") },
-	{ "id": "easy",       "label": "Easy Bot",       "desc": "Casual AI",          "accent": Color("#4ade80") },
-	{ "id": "medium",     "label": "Medium Bot",     "desc": "Balanced AI",        "accent": Color("#facc15") },
-	{ "id": "hard",       "label": "Hard Bot",       "desc": "Aggressive AI",      "accent": Color("#fb923c") },
-	{ "id": "impossible", "label": "Impossible Bot", "desc": "Full power AI",          "accent": Color("#ef4444") },
-	{ "id": "roulette",   "label": "Roulette Bot",   "desc": "Random moves",       "accent": Color("#a855f7") },
-	{ "id": "cautious",   "label": "Cautious Bot",   "desc": "Never blunders",     "accent": Color("#06b6d4") },
-	{ "id": "shepherd",   "label": "Shepherd Bot",   "desc": "Perfects the herd",  "accent": Color("#ec4899") },
+# The difficulty ladder, weakest first. Position in the list = crowns lit.
+const LEVELS: Array[Dictionary] = [
+	{ "id": "beginner",   "label": "Beginner",   "desc": "Plays almost at random" },
+	{ "id": "novice",     "label": "Novice",     "desc": "Knows the moves, misses a lot" },
+	{ "id": "easy",       "label": "Easy",       "desc": "Casual player, often slips" },
+	{ "id": "medium",     "label": "Medium",     "desc": "Solid, still makes mistakes" },
+	{ "id": "hard",       "label": "Hard",       "desc": "Strong and rarely careless" },
+	{ "id": "expert",     "label": "Expert",     "desc": "Full engine, quick thinker" },
+	{ "id": "impossible", "label": "Impossible", "desc": "Full engine, thinks for ages" },
 ]
 
-# ------------------------------------------------------------------
-# GAME TYPES — untimed / standard / armageddon
-# ------------------------------------------------------------------
+const PERSONALITIES: Array[Dictionary] = [
+	{ "id": "roulette", "label": "Roulette", "desc": "Every move is either the best or the worst, 50/50", "accent": Color("#a77bf2") },
+	{ "id": "cautious", "label": "Cautious", "desc": "Never blunders on purpose, plays it safe", "accent": Color("#3fc1d9") },
+	{ "id": "shepherd", "label": "Shepherd", "desc": "Flawless with its donkeys, human with everything else", "accent": Color("#ec6aa6") },
+]
+
 const GAME_TYPES: Array[Dictionary] = [
-	{ "id": "untimed",    "label": "Untimed",    "desc": "No clock",                              "accent": Color("#22c55e") },
-	{ "id": "standard",   "label": "Standard",   "desc": "Equal time for both sides (edit below)", "accent": Color("#facc15") },
-	{ "id": "armageddon", "label": "Armageddon", "desc": "White gets more time, draw = Black wins (edit below)", "accent": Color("#ef4444") },
+	{ "id": "untimed",    "label": "Untimed",    "desc": "No clock" },
+	{ "id": "standard",   "label": "Standard",   "desc": "Same time for both sides" },
+	{ "id": "armageddon", "label": "Armageddon", "desc": "White gets more time, but a draw counts as a win for Black" },
 ]
 
-const BG_COLOR    := Color(0.039, 0.047, 0.086, 0.95)  # near-black overlay
-const PANEL_BG    := Color(0.071, 0.086, 0.133, 1.0)   # card background
-const TITLE_COLOR := Color("#e94560")
-const SUB_COLOR   := Color("#94a3b8")
+
+# Seven little crowns, `level` of them lit.
+class CrownMeter:
+	extends Control
+	var level := 1
+	var color := Color.WHITE
+
+	func _draw():
+		var w := 11.0
+		var gap := 3.0
+		for i in 7:
+			var x := i * (w + gap)
+			var col := color if i < level else Color(1, 1, 1, 0.13)
+			var base_y := size.y / 2.0 + 4.0
+			var pts := PackedVector2Array([
+				Vector2(x, base_y), Vector2(x, base_y - 7), Vector2(x + w * 0.25, base_y - 3.5),
+				Vector2(x + w * 0.5, base_y - 9), Vector2(x + w * 0.75, base_y - 3.5),
+				Vector2(x + w, base_y - 7), Vector2(x + w, base_y)])
+			draw_colored_polygon(pts, col)
+
+
+var _cards := {}   # color -> {human, bot, human_box, bot_box, choices}
+var _standard_row: Control
+var _arma_row: Control
+
 
 func _ready():
 	visible = true
 	z_index = 100
-	set_anchors_preset(Control.PRESET_FULL_RECT)  # Make PlayerSetup fill the screen
+	set_anchors_preset(Control.PRESET_FULL_RECT)
+	white_type = _saved.white
+	black_type = _saved.black
+	game_type = _saved.game_type
+	standard_minutes = _saved.standard
+	armageddon_white_minutes = _saved.arma_white
+	armageddon_black_minutes = _saved.arma_black
 	_build_ui()
 
+
 func _build_ui():
-	# Dark fullscreen overlay
 	var bg := ColorRect.new()
-	bg.name = "Background"
-	bg.color = BG_COLOR
+	bg.color = UITheme.INK
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
-	# Root centering container
-	var root := CenterContainer.new()
-	root.name = "Root"
-	root.set_anchors_preset(Control.PRESET_FULL_RECT)
-	add_child(root)
+	# soft gold glow behind the title
+	var glow := TextureRect.new()
+	var grad := Gradient.new()
+	grad.set_color(0, Color(UITheme.GOLD, 0.10))
+	grad.set_color(1, Color(UITheme.GOLD, 0.0))
+	var gt := GradientTexture2D.new()
+	gt.gradient = grad
+	gt.fill = GradientTexture2D.FILL_RADIAL
+	gt.fill_from = Vector2(0.5, 0.5)
+	gt.fill_to = Vector2(1.0, 0.5)
+	gt.width = 512
+	gt.height = 256
+	glow.texture = gt
+	glow.position = Vector2(240, -120)
+	glow.size = Vector2(800, 400)
+	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(glow)
 
-	var main := VBoxContainer.new()
-	main.name = "MainVBox"
-	main.alignment = BoxContainer.ALIGNMENT_CENTER
-	main.add_theme_constant_override("separation", 20)
-	root.add_child(main)
+	var margin := MarginContainer.new()
+	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	for side in ["left", "right"]:
+		margin.add_theme_constant_override("margin_" + side, 64)
+	margin.add_theme_constant_override("margin_top", 26)
+	margin.add_theme_constant_override("margin_bottom", 26)
+	add_child(margin)
+
+	var main := UITheme.vbox(18)
+	margin.add_child(main)
 
 	# ---- Title ----
-	var title := Label.new()
-	title.text = "Duel of the Seven Crowns"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 38)
-	title.add_theme_color_override("font_color", TITLE_COLOR)
-	main.add_child(title)
+	var title_row := UITheme.hbox(16)
+	title_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	main.add_child(title_row)
+	var icon := TextureRect.new()
+	icon.texture = load("res://icon.svg")
+	icon.custom_minimum_size = Vector2(70, 70)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	title_row.add_child(icon)
+	var tcol := UITheme.vbox(2)
+	tcol.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	title_row.add_child(tcol)
+	tcol.add_child(UITheme.label("Duel of the Seven Crowns", 38, UITheme.GOLD_LIGHT, UITheme.display(700)))
+	tcol.add_child(UITheme.label("Choose who plays each side, then pick a clock.", 15, UITheme.TEXT_DIM, UITheme.ui(500)))
 
-	var sub := Label.new()
-	sub.text = "Select Your Opponents"
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sub.add_theme_font_size_override("font_size", 18)
-	sub.add_theme_color_override("font_color", SUB_COLOR)
-	main.add_child(sub)
+	# ---- Player cards ----
+	var cards := UITheme.hbox(14)
+	cards.alignment = BoxContainer.ALIGNMENT_CENTER
+	cards.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main.add_child(cards)
+	_add_player_card(cards, "white")
+	var swap_col := UITheme.vbox(0)
+	swap_col.alignment = BoxContainer.ALIGNMENT_CENTER
+	cards.add_child(swap_col)
+	var swap := UITheme.button("↔", "ghost", 22, 52)
+	swap.custom_minimum_size = Vector2(52, 52)
+	swap.tooltip_text = "Swap sides"
+	swap.pressed.connect(_on_swap)
+	swap_col.add_child(swap)
+	_add_player_card(cards, "black")
 
-	# ---- Time control card + player cards, side by side ----
-	var hbox := HBoxContainer.new()
-	hbox.name = "PlayersHBox"
-	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	hbox.add_theme_constant_override("separation", 28)
-	main.add_child(hbox)
-
-	_add_game_type_card(hbox)
-	_add_player_card(hbox, "white", "White Player", Color("#fef3c7"), Color("#f59e0b"))
-	_add_player_card(hbox, "black", "Black Player", Color("#a78bfa"), Color("#8b5cf6"))
-
-	# ---- Start button ----
-	var start := Button.new()
-	start.text = "Start Game"
-	start.custom_minimum_size = Vector2(220, 52)
-	start.add_theme_font_size_override("font_size", 20)
-
-	var st_normal := StyleBoxFlat.new()
-	st_normal.bg_color = TITLE_COLOR
-	start.add_theme_stylebox_override("normal", st_normal)
-
-	var st_hover := StyleBoxFlat.new()
-	st_hover.bg_color = Color("#f43f5e")
-	start.add_theme_stylebox_override("hover", st_hover)
-
-	start.add_theme_color_override("font_color", Color("#ffffff"))
-	start.pressed.connect(_on_start)
-	main.add_child(start)
-
-func _add_game_type_card(parent: Node):
-	var panel := PanelContainer.new()
-	panel.name = "GameTypePanel"
-	panel.custom_minimum_size = Vector2(220, 0)
-
-	var panel_style := StyleBoxFlat.new()
-	panel_style.set_bg_color(PANEL_BG)
-	panel_style.set_border_width_all(2)
-	panel_style.set_border_color(Color("#22c55e"))
-	panel_style.set_corner_radius_all(12)
-	panel_style.set_content_margin_all(16)
-	panel.add_theme_stylebox_override("panel", panel_style)
-	panel.set_meta("border_style", panel_style)
-
-	parent.add_child(panel)
-
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 10)
-	panel.add_child(vbox)
-
-	var lbl := Label.new()
-	lbl.text = "Time Control"
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.add_theme_font_size_override("font_size", 20)
-	lbl.add_theme_color_override("font_color", Color("#e2e8f0"))
-	vbox.add_child(lbl)
-
-	var sep := HSeparator.new()
-	var line := StyleBoxLine.new()
-	line.color = Color("#334155")
-	line.thickness = 1
-	sep.add_theme_stylebox_override("separator", line)
-	vbox.add_child(sep)
-
-	var btn_col := VBoxContainer.new()
-	btn_col.add_theme_constant_override("separation", 8)
-	vbox.add_child(btn_col)
-
-	# Built before the buttons below so the default "untimed" selection
-	# (which fires `toggled` immediately) has rows to toggle visibility on.
-	_build_time_settings(vbox)
-
+	# ---- Time control + start ----
+	var bottom := UITheme.panel(UITheme.card(16))
+	main.add_child(bottom)
+	var brow := UITheme.hbox(18)
+	bottom.add_child(brow)
+	var tc := UITheme.vbox(8)
+	brow.add_child(tc)
+	tc.add_child(UITheme.heading("Time control"))
+	var trow := UITheme.hbox(8)
+	tc.add_child(trow)
 	var group := ButtonGroup.new()
+	for g in GAME_TYPES:
+		var b := UITheme.pill(g.label, UITheme.GOLD, 14, 36)
+		b.custom_minimum_size.x = 112
+		b.tooltip_text = g.desc
+		b.button_group = group
+		b.button_pressed = g.id == game_type
+		b.toggled.connect(func(on): if on: _set_game_type(g.id))
+		trow.add_child(b)
 
-	for gt in GAME_TYPES:
-		var btn := Button.new()
-		btn.text = gt["label"]
-		btn.tooltip_text = gt["desc"]
-		btn.toggle_mode = true
-		btn.button_group = group
-		btn.custom_minimum_size = Vector2(150, 44)
-		btn.add_theme_font_size_override("font_size", 13)
+	var settings := UITheme.hbox(14)
+	settings.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	settings.size_flags_vertical = Control.SIZE_SHRINK_END
+	brow.add_child(settings)
+	_standard_row = UITheme.hbox(8)
+	_standard_row.add_child(_time_label("Minutes each"))
+	_standard_row.add_child(_minutes_spin(standard_minutes, func(v): standard_minutes = v))
+	settings.add_child(_standard_row)
+	_arma_row = UITheme.hbox(8)
+	_arma_row.add_child(_time_label("White"))
+	_arma_row.add_child(_minutes_spin(armageddon_white_minutes, func(v): armageddon_white_minutes = v))
+	_arma_row.add_child(_time_label("  Black"))
+	_arma_row.add_child(_minutes_spin(armageddon_black_minutes, func(v): armageddon_black_minutes = v))
+	settings.add_child(_arma_row)
+	_set_game_type(game_type)
 
-		var n := StyleBoxFlat.new()
-		n.bg_color = Color(0.12, 0.14, 0.20)
-		n.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("normal", n)
+	var start := UITheme.button("Start game", "primary", 19, 56)
+	start.custom_minimum_size = Vector2(230, 56)
+	start.add_theme_font_override("font", UITheme.ui(700))
+	start.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	start.pressed.connect(_on_start)
+	brow.add_child(start)
 
-		var h := StyleBoxFlat.new()
-		h.bg_color = Color(0.18, 0.20, 0.28)
-		h.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("hover", h)
 
-		var p := StyleBoxFlat.new()
-		p.bg_color = gt["accent"]
-		p.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("pressed", p)
+func _time_label(t: String) -> Label:
+	var l := UITheme.label(t, 14, UITheme.TEXT_DIM, UITheme.ui(500))
+	l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	return l
 
-		btn.add_theme_color_override("font_color", Color("#cbd5e1"))
-		btn.add_theme_color_override("font_pressed_color", Color("#0f172a"))
-		btn.add_theme_color_override("font_hover_color", Color("#f8fafc"))
-
-		btn.toggled.connect(func(pressed: bool):
-			if pressed:
-				game_type = gt["id"]
-				var style: StyleBoxFlat = panel.get_meta("border_style")
-				style.set_border_color(gt["accent"])
-				_standard_row.visible = gt["id"] == "standard"
-				_arma_row.visible = gt["id"] == "armageddon"
-		)
-
-		if gt["id"] == "untimed":
-			btn.button_pressed = true
-			var style: StyleBoxFlat = panel.get_meta("border_style")
-			style.set_border_color(gt["accent"])
-
-		btn_col.add_child(btn)
-
-func _make_minutes_spin(initial: float) -> SpinBox:
+func _minutes_spin(initial: float, on_change: Callable) -> SpinBox:
 	var spin := SpinBox.new()
 	spin.min_value = 1
 	spin.max_value = 180
 	spin.step = 1
 	spin.value = initial
 	spin.suffix = "min"
-	spin.custom_minimum_size = Vector2(64, 0)
-	spin.add_theme_color_override("font_color", Color("#e2e8f0"))
+	spin.custom_minimum_size = Vector2(96, 36)
+	spin.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var le := spin.get_line_edit()
+	le.add_theme_stylebox_override("normal", UITheme.box(UITheme.SURFACE_LO, 8, UITheme.BORDER, 1, 6))
+	le.add_theme_stylebox_override("focus", UITheme.box(UITheme.SURFACE_LO, 8, UITheme.GOLD, 1, 6))
+	le.add_theme_color_override("font_color", UITheme.TEXT)
+	le.add_theme_font_override("font", UITheme.ui(600))
+	spin.value_changed.connect(on_change)
 	return spin
 
-func _build_time_settings(parent: Node):
-	var sep := HSeparator.new()
-	var line := StyleBoxLine.new()
-	line.color = Color("#334155")
-	line.thickness = 1
-	sep.add_theme_stylebox_override("separator", line)
-	parent.add_child(sep)
+func _set_game_type(id: String):
+	game_type = id
+	_standard_row.visible = id == "standard"
+	_arma_row.visible = id == "armageddon"
 
-	# ---- Standard: one shared time for both sides ----
-	_standard_row = HBoxContainer.new()
-	_standard_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	_standard_row.add_theme_constant_override("separation", 8)
-	_standard_row.visible = false
-	parent.add_child(_standard_row)
 
-	var std_lbl := Label.new()
-	std_lbl.text = "Minutes per side:"
-	std_lbl.add_theme_font_size_override("font_size", 13)
-	std_lbl.add_theme_color_override("font_color", Color("#cbd5e1"))
-	_standard_row.add_child(std_lbl)
+# ---------------------------------------------------------------------------
+# Player cards
+# ---------------------------------------------------------------------------
+func _add_player_card(parent: Node, color: String):
+	var card := UITheme.panel(UITheme.card(18))
+	card.custom_minimum_size = Vector2(500, 0)
+	parent.add_child(card)
+	var v := UITheme.vbox(12)
+	card.add_child(v)
 
-	_standard_spin = _make_minutes_spin(standard_minutes)
-	_standard_spin.value_changed.connect(func(v: float): standard_minutes = v)
-	_standard_row.add_child(_standard_spin)
+	# Header: token + side name + Human/Computer switch
+	var head := UITheme.hbox(12)
+	v.add_child(head)
+	head.add_child(UITheme.piece_token(("w" if color == "white" else "b") + "K", 44))
+	var names := UITheme.vbox(0)
+	names.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	head.add_child(names)
+	names.add_child(UITheme.label(color.capitalize(), 24, UITheme.IVORY if color == "white" else Color("#b9c3dc"), UITheme.display(700)))
+	names.add_child(UITheme.label("Moves first" if color == "white" else "Moves second", 13, UITheme.TEXT_FAINT, UITheme.ui(500)))
+	head.add_child(UITheme.spacer())
+	var mode_group := ButtonGroup.new()
+	var mh := UITheme.pill("Human", UITheme.EMERALD, 14, 36)
+	mh.custom_minimum_size.x = 100
+	mh.button_group = mode_group
+	var mb := UITheme.pill("Computer", UITheme.GOLD, 14, 36)
+	mb.custom_minimum_size.x = 100
+	mb.button_group = mode_group
+	var mode_row := UITheme.hbox(6)
+	mode_row.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	mode_row.add_child(mh)
+	mode_row.add_child(mb)
+	head.add_child(mode_row)
 
-	# ---- Armageddon: separate White / Black times ----
-	_arma_row = VBoxContainer.new()
-	_arma_row.add_theme_constant_override("separation", 6)
-	_arma_row.visible = false
-	parent.add_child(_arma_row)
+	# Human panel
+	var human_box := UITheme.vbox(10)
+	human_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	human_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	v.add_child(human_box)
+	var big := UITheme.piece_token(("w" if color == "white" else "b") + "K", 96)
+	big.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	human_box.add_child(big)
+	var ht := UITheme.label("A person plays %s on this computer." % color.capitalize(), 16, UITheme.TEXT, UITheme.ui(500))
+	ht.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	human_box.add_child(ht)
+	var hs := UITheme.label("Playing a computer? Your side starts at the bottom of the board.", 13, UITheme.TEXT_FAINT, UITheme.ui(500))
+	hs.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	human_box.add_child(hs)
 
-	var white_row := HBoxContainer.new()
-	white_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	white_row.add_theme_constant_override("separation", 8)
-	_arma_row.add_child(white_row)
+	# Computer panel
+	var bot_box := UITheme.vbox(6)
+	bot_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	v.add_child(bot_box)
+	bot_box.add_child(UITheme.heading("Difficulty"))
+	var choice_group := ButtonGroup.new()
+	var choices := {}
+	for i in LEVELS.size():
+		var lv: Dictionary = LEVELS[i]
+		var b := _level_row(lv, i + 1, UITheme.LEVEL_COLORS[i])
+		b.button_group = choice_group
+		b.toggled.connect(func(on): if on: _choose_bot(color, lv.id))
+		bot_box.add_child(b)
+		choices[lv.id] = b
+	bot_box.add_child(UITheme.heading("Personalities"))
+	var prow := UITheme.hbox(8)
+	bot_box.add_child(prow)
+	for p in PERSONALITIES:
+		var b := UITheme.pill(p.label, p.accent, 13, 32)
+		b.tooltip_text = p.desc
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.button_group = choice_group
+		b.toggled.connect(func(on): if on: _choose_bot(color, p.id))
+		prow.add_child(b)
+		choices[p.id] = b
 
-	var white_lbl := Label.new()
-	white_lbl.text = "White minutes:"
-	white_lbl.add_theme_font_size_override("font_size", 13)
-	white_lbl.add_theme_color_override("font_color", Color("#cbd5e1"))
-	white_row.add_child(white_lbl)
+	_cards[color] = {"human": mh, "bot": mb, "human_box": human_box, "bot_box": bot_box, "choices": choices}
+	mh.toggled.connect(func(on): if on: _set_mode(color, true))
+	mb.toggled.connect(func(on): if on: _set_mode(color, false))
 
-	_arma_white_spin = _make_minutes_spin(armageddon_white_minutes)
-	_arma_white_spin.value_changed.connect(func(v: float): armageddon_white_minutes = v)
-	white_row.add_child(_arma_white_spin)
+	var current: String = white_type if color == "white" else black_type
+	var bot_choice: String = current if current != "human" else _saved[color + "_bot"]
+	if choices.has(bot_choice):
+		choices[bot_choice].button_pressed = true
+	if current == "human":
+		mh.button_pressed = true
+	else:
+		mb.button_pressed = true
+	_set_mode(color, current == "human")
 
-	var black_row := HBoxContainer.new()
-	black_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	black_row.add_theme_constant_override("separation", 8)
-	_arma_row.add_child(black_row)
 
-	var black_lbl := Label.new()
-	black_lbl.text = "Black minutes:"
-	black_lbl.add_theme_font_size_override("font_size", 13)
-	black_lbl.add_theme_color_override("font_color", Color("#cbd5e1"))
-	black_row.add_child(black_lbl)
+# One row of the difficulty ladder: crown meter, name, description.
+func _level_row(lv: Dictionary, level: int, accent: Color) -> Button:
+	var b := Button.new()
+	b.toggle_mode = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	b.custom_minimum_size = Vector2(0, 33)
+	b.add_theme_stylebox_override("normal", UITheme.box(Color(0, 0, 0, 0), 8))
+	b.add_theme_stylebox_override("hover", UITheme.box(UITheme.SURFACE_HI, 8, UITheme.BORDER_SOFT, 1))
+	var sel := UITheme.box(Color(accent, 0.13), 8, accent, 2)
+	b.add_theme_stylebox_override("pressed", sel)
+	b.add_theme_stylebox_override("hover_pressed", sel)
+	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 
-	_arma_black_spin = _make_minutes_spin(armageddon_black_minutes)
-	_arma_black_spin.value_changed.connect(func(v: float): armageddon_black_minutes = v)
-	black_row.add_child(_arma_black_spin)
+	var row := UITheme.hbox(12)
+	row.set_anchors_preset(Control.PRESET_FULL_RECT)
+	row.offset_left = 12
+	row.offset_right = -12
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	b.add_child(row)
+	var meter := CrownMeter.new()
+	meter.level = level
+	meter.color = accent
+	meter.custom_minimum_size = Vector2(96, 0)
+	meter.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(meter)
+	var nm := UITheme.label(lv.label, 15, UITheme.TEXT, UITheme.ui(650))
+	nm.custom_minimum_size = Vector2(96, 0)
+	nm.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(nm)
+	var desc := UITheme.label(lv.desc, 13, UITheme.TEXT_DIM, UITheme.ui(450))
+	desc.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	desc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(desc)
+	return b
 
-func _add_player_card(parent: Node, player_id: String, header: String, border_base: Color, header_color: Color):
-	var panel := PanelContainer.new()
-	panel.name = player_id.capitalize() + "Panel"
-	panel.custom_minimum_size = Vector2(260, 0)
 
-	# Card background & border
-	var panel_style := StyleBoxFlat.new()
-	panel_style.set_bg_color(PANEL_BG)
-	panel_style.set_border_width_all(2)
-	panel_style.set_border_color(border_base)
-	panel_style.set_corner_radius_all(12)
-	panel_style.set_content_margin_all(16)
-	panel.add_theme_stylebox_override("panel", panel_style)
-	panel.set_meta("border_style", panel_style)  # keep ref for live updates
+func _set_mode(color: String, human: bool):
+	var c: Dictionary = _cards[color]
+	c.human_box.visible = human
+	c.bot_box.visible = not human
+	if human:
+		_set_type(color, "human")
+	else:
+		var chosen: String = _saved[color + "_bot"]
+		for id in c.choices:
+			if c.choices[id].button_pressed:
+				chosen = id
+		_set_type(color, chosen)
 
-	parent.add_child(panel)
+func _choose_bot(color: String, id: String):
+	_saved[color + "_bot"] = id
+	if not _cards[color].human.button_pressed:
+		_set_type(color, id)
 
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 10)
-	panel.add_child(vbox)
+func _set_type(color: String, t: String):
+	if color == "white":
+		white_type = t
+	else:
+		black_type = t
 
-	# Header
-	var lbl := Label.new()
-	lbl.text = header
-	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.add_theme_font_size_override("font_size", 22)
-	lbl.add_theme_color_override("font_color", header_color)
-	vbox.add_child(lbl)
+func _on_swap():
+	var w := white_type
+	var b := black_type
+	var wb: String = _saved.white_bot
+	_saved.white_bot = _saved.black_bot
+	_saved.black_bot = wb
+	_apply_choice("white", b)
+	_apply_choice("black", w)
 
-	# Divider
-	var sep := HSeparator.new()
-	var line := StyleBoxLine.new()
-	line.color = border_base
-	line.thickness = 1
-	sep.add_theme_stylebox_override("separator", line)
-	vbox.add_child(sep)
+func _apply_choice(color: String, t: String):
+	var c: Dictionary = _cards[color]
+	if t == "human":
+		c.human.button_pressed = true
+	else:
+		if c.choices.has(t):
+			c.choices[t].button_pressed = true
+		c.bot.button_pressed = true
+	_set_mode(color, t == "human")
 
-	# Options grid: 2 columns × 5 rows = 10 slots (was 8, now 9 options)
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 8)
-	grid.add_theme_constant_override("v_separation", 8)
-	vbox.add_child(grid)
-
-	var group := ButtonGroup.new()
-
-	for opt in OPTIONS:
-		var btn := Button.new()
-		btn.text = opt["label"]
-		btn.tooltip_text = opt["desc"]
-		btn.toggle_mode = true
-		btn.button_group = group
-		btn.custom_minimum_size = Vector2(110, 44)
-		btn.add_theme_font_size_override("font_size", 13)
-
-		# Normal
-		var n := StyleBoxFlat.new()
-		n.bg_color = Color(0.12, 0.14, 0.20)
-		n.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("normal", n)
-
-		# Hover
-		var h := StyleBoxFlat.new()
-		h.bg_color = Color(0.18, 0.20, 0.28)
-		h.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("hover", h)
-
-		# Pressed / Selected
-		var p := StyleBoxFlat.new()
-		p.bg_color = opt["accent"]
-		p.set_corner_radius_all(6)
-		btn.add_theme_stylebox_override("pressed", p)
-
-		btn.add_theme_color_override("font_color", Color("#cbd5e1"))
-		btn.add_theme_color_override("font_pressed_color", Color("#0f172a"))
-		btn.add_theme_color_override("font_hover_color", Color("#f8fafc"))
-
-		btn.toggled.connect(func(pressed: bool):
-			if pressed:
-				if player_id == "white":
-					white_type = opt["id"]
-				else:
-					black_type = opt["id"]
-				# Flash the card border to match the selected bot's accent
-				var style: StyleBoxFlat = panel.get_meta("border_style")
-				style.set_border_color(opt["accent"])
-		)
-
-		# Default selection
-		if opt["id"] == "human":
-			btn.button_pressed = true
-			var style: StyleBoxFlat = panel.get_meta("border_style")
-			style.set_border_color(opt["accent"])
-
-		grid.add_child(btn)
 
 func _on_start():
+	_saved.white = white_type
+	_saved.black = black_type
+	_saved.game_type = game_type
+	_saved.standard = standard_minutes
+	_saved.arma_white = armageddon_white_minutes
+	_saved.arma_black = armageddon_black_minutes
 	visible = false
 	players_selected.emit(
 		white_type, black_type, game_type,
@@ -381,3 +405,4 @@ func _on_start():
 		armageddon_white_minutes * 60.0,
 		armageddon_black_minutes * 60.0
 	)
+	queue_free()

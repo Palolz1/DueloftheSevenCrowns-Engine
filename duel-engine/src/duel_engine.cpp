@@ -283,6 +283,7 @@ void ThreadData::clear()
     std::memset(cont_history, 0, sizeof(cont_history));
     for (int i = 0; i < MAX_PLY + 4; ++i)
         static_eval_stack[i] = NO_EVAL;
+    null_barrier = 0;
 }
 
 void ThreadData::maybe_apply_gravity()
@@ -298,11 +299,19 @@ void ThreadData::maybe_apply_gravity()
                 for (int d = 0; d < 7; ++d)
                     history[a][b][c][d] >>= 1;
 
-    for (int a = 0; a < 10; ++a)
-        for (int b = 0; b < 49; ++b)
-            for (int c = 0; c < 49; ++c)
-                for (int d = 0; d < 49; ++d)
-                    cont_history[a][b][c][d] >>= 1;
+    // cont_history is NOT swept any more: it is 1.2M entries (2.3 MB), and
+    // halving it every 1024 nodes was ~22% of total search time. It now
+    // self-limits via the gravity formula in update_cont_history() instead.
+}
+
+// Stockfish-style history gravity: the bonus shrinks as the entry approaches
+// +/-CONT_HISTORY_MAX, so values stay bounded without any periodic sweep.
+static inline void update_cont_history(int16_t &entry, int bonus)
+{
+    constexpr int CONT_HISTORY_MAX = 8192;
+    bonus = std::clamp(bonus, -CONT_HISTORY_MAX, CONT_HISTORY_MAX);
+    int v = entry + bonus - entry * std::abs(bonus) / CONT_HISTORY_MAX;
+    entry = static_cast<int16_t>(std::clamp(v, -CONT_HISTORY_MAX, CONT_HISTORY_MAX));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1010,7 +1019,11 @@ int Evaluator::king_danger(const FastBoard &fb, int king_r, int king_c, int atta
                     }
         }
     danger += attackers_near * attackers_near * 3;
-    return danger;
+    // The attackers_near^2 term is unbounded (20 attacked squares alone was
+    // 1200cp), which let the static eval report "+20 pawns" for positions
+    // with level material and no forced win. Real mates are the search's job;
+    // cap the heuristic so it can't pretend to be one.
+    return std::min(danger, KING_DANGER_CAP);
 }
 
 int Evaluator::see(const FastBoard &fb, uint32_t move)
@@ -1289,7 +1302,7 @@ std::vector<uint32_t> Searcher::order_moves(FastBoard &fb,
 }
 
 // ─── Quiescence ────────────────────────────────────────────────
-int Searcher::quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm, ThreadData &td)
+int Searcher::quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm, ThreadData &td, int qply)
 {
     if (ply >= MAX_PLY)
         return Evaluator::evaluate(fb, hm);
@@ -1306,13 +1319,15 @@ int Searcher::quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm, Th
     if (in_check)
     {
         auto pseudo = MoveGenerator::generate_pseudo_moves(fb);
-        int best = -MATE_SCORE, legal = 0;
+        int best = -MATE_SCORE + ply, legal = 0;
         for (uint32_t move : pseudo)
         {
+            // On timeout return a neutral 0 (never `best`, which may still be a
+            // mate-sentinel). Callers check timed_out and discard the value.
             if ((td.nodes & 15) == 0 && std::chrono::steady_clock::now() > deadline)
             {
                 timed_out.store(true, std::memory_order_relaxed);
-                return best;
+                return 0;
             }
 
             int fr, fc, tr, tc, cap;
@@ -1322,7 +1337,7 @@ int Searcher::quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm, Th
 
             int8_t pb = fb.grid[FastBoard::sq(fr, fc)];
             bool isd = (std::abs(pb) == 7);
-            int chm = (cap || isd) ? 0 : hm + 1;
+            int chm = (cap || (isd && (tr == 0 || tr == 6))) ? 0 : hm + 1; // capture or promotion
 
             fb.make_move(move, zobrist);
             if (fb.is_in_check(-fb.turn))
@@ -1331,8 +1346,10 @@ int Searcher::quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm, Th
                 continue;
             }
             ++legal;
-            int val = -quiescence(fb, -beta, -alpha, ply + 1, chm, td);
+            int val = -quiescence(fb, -beta, -alpha, ply + 1, chm, td, qply + 1);
             fb.unmake_move();
+            if (timed_out.load(std::memory_order_relaxed))
+                return 0;
 
             if (val > best)
                 best = val;
@@ -1352,48 +1369,119 @@ int Searcher::quiescence(FastBoard &fb, int alpha, int beta, int ply, int hm, Th
     int best = stand_pat;
     if (stand_pat > alpha)
         alpha = stand_pat;
-    if (stand_pat + 900 < alpha)
-        return stand_pat; // delta pruning
 
-    auto caps = MoveGenerator::generate_captures(fb);
-    if (caps.empty())
-        return stand_pat;
-    auto ordered = order_moves(fb, caps, std::min(ply, 63), 0, 0, td);
+    // Delta pruning: no capture can lift us back to alpha. We still try quiet
+    // checks below (at the first qsearch ply) because a check can be mate.
+    bool delta_pruned = (stand_pat + 900 < alpha);
 
-    for (uint32_t move : ordered)
+    if (!delta_pruned)
     {
-        if ((td.nodes & 15) == 0 && std::chrono::steady_clock::now() > deadline)
+        auto caps = MoveGenerator::generate_captures(fb);
+        if (!caps.empty())
         {
-            timed_out.store(true, std::memory_order_relaxed);
-            return best;
+            auto ordered = order_moves(fb, caps, std::min(ply, 63), 0, 0, td);
+
+            for (uint32_t move : ordered)
+            {
+                if ((td.nodes & 15) == 0 && std::chrono::steady_clock::now() > deadline)
+                {
+                    timed_out.store(true, std::memory_order_relaxed);
+                    return 0;
+                }
+
+                int fr, fc, tr, tc, cap;
+                MoveGenerator::unpack_move(move, fr, fc, tr, tc, cap);
+                int8_t pb = fb.grid[FastBoard::sq(fr, fc)];
+                bool isd = (std::abs(pb) == 7);
+
+                int see_val = Evaluator::see(fb, move);
+                if (see_val < 0 && stand_pat + see_val + 50 < alpha)
+                    continue;
+
+                int chm = (cap || (isd && (tr == 0 || tr == 6))) ? 0 : hm + 1; // capture or promotion
+                fb.make_move(move, zobrist);
+                if (fb.is_in_check(-fb.turn))
+                {
+                    fb.unmake_move();
+                    continue;
+                }
+                int val = -quiescence(fb, -beta, -alpha, ply + 1, chm, td, qply + 1);
+                fb.unmake_move();
+                if (timed_out.load(std::memory_order_relaxed))
+                    return 0;
+
+                if (val > best)
+                    best = val;
+                if (val > alpha)
+                    alpha = val;
+                if (alpha >= beta)
+                    return best;
+            }
         }
+    }
 
-        int fr, fc, tr, tc, cap;
-        MoveGenerator::unpack_move(move, fr, fc, tr, tc, cap);
-        int8_t pb = fb.grid[FastBoard::sq(fr, fc)];
-        bool isd = (std::abs(pb) == 7);
-
-        if (Evaluator::see(fb, move) < 0 && stand_pat + Evaluator::see(fb, move) + 50 < alpha)
-            continue;
-
-        int chm = (cap || isd) ? 0 : hm + 1;
-        fb.make_move(move, zobrist);
-        if (fb.is_in_check(-fb.turn))
+    // Quiet checks, first qsearch ply only. Without these, a mate that lands
+    // one ply past the horizon is invisible: the search sees a big static
+    // eval ("+20") instead of a forced mate. Limited to qply == 0 so
+    // check / evasion / check chains can't explode.
+    if (qply == 0)
+    {
+        auto pseudo = MoveGenerator::generate_pseudo_moves(fb);
+        for (uint32_t move : pseudo)
         {
+            int fr, fc, tr, tc, cap;
+            MoveGenerator::unpack_move(move, fr, fc, tr, tc, cap);
+            if (cap)
+                continue; // captures were handled above
+            int8_t pb = fb.grid[FastBoard::sq(fr, fc)];
+            bool isd = (std::abs(pb) == 7);
+            bool is_promo = isd && ((pb > 0 && tr == 6) || (pb < 0 && tr == 0));
+
+            fb.make_move(move, zobrist);
+            if (fb.is_in_check(-fb.turn) || !fb.is_in_check(fb.turn))
+            {
+                fb.unmake_move();
+                continue; // illegal, or not a check
+            }
+            int chm = is_promo ? 0 : hm + 1;
+            int val = -quiescence(fb, -beta, -alpha, ply + 1, chm, td, qply + 1);
             fb.unmake_move();
-            continue;
-        }
-        int val = -quiescence(fb, -beta, -alpha, ply + 1, chm, td);
-        fb.unmake_move();
+            if (timed_out.load(std::memory_order_relaxed))
+                return 0;
 
-        if (val > best)
-            best = val;
-        if (val > alpha)
-            alpha = val;
-        if (alpha >= beta)
-            return best;
+            if (val > best)
+                best = val;
+            if (val > alpha)
+                alpha = val;
+            if (alpha >= beta)
+                return best;
+        }
     }
     return best;
+}
+
+// ─── Repetition ────────────────────────────────────────────────
+bool Searcher::is_repetition(const FastBoard &fb, const ThreadData &td) const
+{
+    // Walk back along the moves made on this board (search path, plus any game
+    // moves made via DuelEngine::make_move). Positions from before a capture or
+    // promotion can never recur, so stop there.
+    for (int i = static_cast<int>(fb.history.size()) - 1; i >= td.null_barrier; --i)
+    {
+        const auto &h = fb.history[i];
+        bool promo = std::abs(h.piece) == 7 &&
+                     (FastBoard::row(h.to_sq) == 0 || FastBoard::row(h.to_sq) == 6);
+        if (h.captured != 0 || promo)
+            return false;
+        if (h.old_hash == fb.zhash)
+            return true;
+    }
+    if (td.null_barrier > 0)
+        return false; // path crosses a null move; don't compare with the game
+    for (uint64_t k : game_keys)
+        if (k == fb.zhash)
+            return true;
+    return false;
 }
 
 // ─── Negamax ───────────────────────────────────────────────────
@@ -1404,6 +1492,11 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
     if (ply >= MAX_PLY)
         return Evaluator::evaluate(fb, hm);
     if (fb.is_insufficient_material() || hm >= 40)
+        return 0;
+    // Repeated position = draw. Scored as 0 on the FIRST repetition (standard
+    // engine practice): if repeating is good for one side it can be repeated
+    // again, so the outcome is the same as a threefold.
+    if (ply > 0 && is_repetition(fb, td))
         return 0;
     if (timed_out.load(std::memory_order_relaxed))
         return 0;
@@ -1427,11 +1520,22 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
     if (tt_hit)
         return tt_score;
 
-    // IID: no TT move at depth >= 4 → search one ply shallower to get one
-    if (tt_move == 0 && depth >= 4)
-        --depth;
     if (depth <= 0)
         return quiescence(fb, alpha, beta, ply, hm, td);
+
+    // IID: no TT move at a deep node -> run a reduced search purely to get a
+    // good first move into the TT, then search this node at FULL depth.
+    // (The old code just did --depth, which silently shortened every node
+    // without a TT move -- including mating lines.)
+    if (tt_move == 0 && depth >= 5)
+    {
+        negamax(fb, depth - 2, alpha, beta, ply, false, wp, bp, extensions, hm, td);
+        if (timed_out.load(std::memory_order_relaxed))
+            return 0;
+        int iid_score = 0;
+        TTFlag iid_flag = TT_NONE;
+        shared_tt.probe(key, MAX_PLY, alpha, beta, ply, tt_move, iid_score, iid_flag);
+    }
 
     bool in_check = fb.is_in_check(fb.turn);
     bool near_mate = (std::abs(alpha) >= NEAR_MATE || std::abs(beta) >= NEAR_MATE);
@@ -1455,11 +1559,18 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
     {
         fb.turn = -fb.turn;
         fb.zhash ^= zobrist.turn;
+        int saved_barrier = td.null_barrier;
+        td.null_barrier = static_cast<int>(fb.history.size());
         int nv = -negamax(fb, depth - NMP_R - 1, -beta, -beta + 1, ply + 1, false, wp, bp, extensions, hm, td);
+        td.null_barrier = saved_barrier;
         fb.turn = -fb.turn;
         fb.zhash ^= zobrist.turn;
+        if (timed_out.load(std::memory_order_relaxed))
+            return 0;
+        // A null-move result never proves a mate (passing isn't a legal
+        // move), so don't let a mate score escape from here.
         if (nv >= beta)
-            return nv;
+            return (nv >= MATE_BOUND) ? beta : nv;
     }
 
     // Reverse futility pruning
@@ -1471,17 +1582,31 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
             return static_eval;
     }
 
-    // Futility pruning
-    static const int FUT_BASE[4] = {0, 150, 350, 600};
-    if (static_eval && depth >= 1 && depth <= 3)
+    // Razoring (was "futility pruning"): hopeless-looking node -> verify with
+    // qsearch, and only trust it if qsearch agrees we're below alpha.
+    // Previously it returned qsearch unconditionally at depth <= 3, which hid
+    // every quiet resource (and every mate) in those subtrees.
+    static const int RAZOR_BASE[3] = {0, 300, 700};
+    if (static_eval && depth >= 1 && depth <= 2)
     {
-        int m = FUT_BASE[depth] * (improving ? 1 : 2);
+        int m = RAZOR_BASE[depth] * (improving ? 1 : 2);
         if (static_eval + m <= alpha)
-            return quiescence(fb, alpha, beta, ply, hm, td);
+        {
+            int qv = quiescence(fb, alpha, beta, ply, hm, td);
+            if (timed_out.load(std::memory_order_relaxed))
+                return 0;
+            if (qv <= alpha)
+                return qv;
+        }
     }
 
-    int lmp_base = 4 + depth * depth;
-    int lmp_limit = improving ? lmp_base : lmp_base / 2;
+    // Late-move pruning: shallow depth only, counted over QUIET moves only,
+    // never prunes checks. The old limit was (4 + d*d) / 2 over ALL move
+    // indices at EVERY depth -- just 2 moves searched at depth 1 -- which
+    // routinely threw away the quiet mating move.
+    constexpr int LMP_MAX_DEPTH = 4;
+    int lmp_limit = (improving ? 5 : 3) + depth * depth;
+    int quiets_tried = 0;
 
     uint32_t countermove = 0;
     if (!fb.history.empty())
@@ -1502,8 +1627,10 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
     {
         if ((td.nodes & 15) == 0 && std::chrono::steady_clock::now() > deadline)
         {
+            // Return a neutral 0, never `best`: best may still be the
+            // -MATE_SCORE sentinel, which the parent would read as "I mate".
             timed_out.store(true, std::memory_order_relaxed);
-            return best;
+            return 0;
         }
 
         uint32_t move = moves[i];
@@ -1515,7 +1642,6 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
         int8_t piece = fb.grid[FastBoard::sq(fr, fc)];
         bool is_cap = (cap != 0);
         bool is_promo = (std::abs(piece) == 7 && ((piece > 0 && tr == 6) || (piece < 0 && tr == 0)));
-        bool is_dk = (std::abs(piece) == 7);
 
         fb.make_move(move, zobrist);
         shared_tt.prefetch(fb.zhash); // prefetch child's bucket while we finish this node
@@ -1542,20 +1668,26 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
                 ++nbp;
         }
 
-        int chm = (is_cap || is_promo || is_dk) ? 0 : hm + 1;
+        int chm = (is_cap || is_promo) ? 0 : hm + 1; // 40-move clock: captures & promotions only
 
-        // LMP
-        if (!is_cap && !is_promo && !in_check && !near_mate &&
-            static_cast<int>(i) >= lmp_limit)
+        bool gives_check = fb.is_in_check(fb.turn);
+        bool is_quiet = !is_cap && !is_promo;
+
+        // LMP (see comment above). Only once we have a real, non-mated best
+        // score, so pruning can never leave a node "all moves pruned" and
+        // return a bogus -MATE.
+        if (is_quiet && !gives_check && !in_check && !near_mate &&
+            depth <= LMP_MAX_DEPTH && best > -MATE_BOUND &&
+            quiets_tried >= lmp_limit)
         {
             fb.unmake_move();
             continue;
         }
+        if (is_quiet)
+            ++quiets_tried;
 
-        if (!is_cap)
+        if (!is_cap && sqc < 128)
             searched_quiets[sqc++] = move;
-
-        bool gives_check = fb.is_in_check(fb.turn);
         int cext = extensions, cadd = 0;
         if (gives_check && cext < MAX_EXTENSIONS)
         {
@@ -1578,7 +1710,9 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
         }
 
         int val;
-        if (i == 0)
+        // First LEGAL move gets the full window (was `i == 0`, which gave the
+        // first legal move a null window whenever moves[0] was illegal).
+        if (legal_count == 1)
             val = -negamax(fb, cdepth, -beta, -alpha, ply + 1, true, nwp, nbp, cext, chm, td);
         else
         {
@@ -1588,6 +1722,11 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
         }
 
         fb.unmake_move();
+
+        // Child was cut short by the clock: its value is meaningless. Bail out
+        // WITHOUT touching best/alpha and, crucially, without storing to the TT.
+        if (timed_out.load(std::memory_order_relaxed))
+            return 0;
 
         if (val > best)
         {
@@ -1615,7 +1754,7 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
                     td.countermoves[ppt][pto] = move;
                     int16_t &ch = td.cont_history[ppt][pto]
                                                  [FastBoard::sq(fr, fc)][FastBoard::sq(tr, tc)];
-                    ch = static_cast<int16_t>(std::max<int>(-8192, std::min<int>(8192, ch + bonus)));
+                    update_cont_history(ch, bonus);
                 }
                 for (int j = 0; j < sqc; ++j)
                 {
@@ -1630,7 +1769,7 @@ int Searcher::negamax(FastBoard &fb, int depth, int alpha, int beta, int ply,
                         int ppt = std::abs(he.piece), pto = he.to_sq;
                         int16_t &ch = td.cont_history[ppt][pto]
                                                      [FastBoard::sq(pr, pc2)][FastBoard::sq(qr, qc)];
-                        ch = static_cast<int16_t>(std::max<int>(-8192, std::min<int>(8192, ch - bonus / 4)));
+                        update_cont_history(ch, -bonus / 4);
                     }
                 }
             }
@@ -1744,8 +1883,7 @@ void Searcher::smp_worker(FastBoard board, // by value — thread owns its copy
 
             int8_t piece = board.history.back().piece;
             bool is_promo = (std::abs(piece) == 7 && ((piece > 0 && tr == 6) || (piece < 0 && tr == 0)));
-            bool is_dk = (std::abs(piece) == 7);
-            int chm = (cap || is_promo || is_dk) ? 0 : halfmove_clock + 1;
+            int chm = (cap || is_promo) ? 0 : halfmove_clock + 1;
 
             int val;
             if (i == 0)
@@ -1912,8 +2050,17 @@ Searcher::SearchResult Searcher::find_best_move(const FastBoard &fb, int max_dep
                 atomic_best_move.store(best_move_so_far, std::memory_order_relaxed);
                 atomic_best_score.store(best_score_so_far, std::memory_order_relaxed);
 
-                if (std::abs(best_score_so_far) >= NEAR_MATE)
-                    break;
+                // Stop on a mate only once the nominal depth covers the mate's
+                // length. A mate can first show up at a shallow depth via check
+                // extensions / qsearch checks; breaking right then reported a
+                // slower mate (and played its first move) even when a faster
+                // one existed.
+                if (std::abs(best_score_so_far) >= MATE_BOUND)
+                {
+                    int mate_plies = MATE_SCORE - std::abs(best_score_so_far);
+                    if (d >= mate_plies)
+                        break;
+                }
             }
         }
     }
@@ -1936,6 +2083,55 @@ Searcher::SearchResult Searcher::find_best_move(const FastBoard &fb, int max_dep
     bool is_white = (fb.turn == 1);
     result.mate_info = format_mate(is_white ? result.score : -result.score);
     return result;
+}
+
+std::vector<std::pair<uint32_t, int>> Searcher::score_root_moves(const FastBoard &fb, int depth,
+                                                                 double time_limit_sec,
+                                                                 int halfmove_clock)
+{
+    std::vector<std::pair<uint32_t, int>> out;
+    tt_age = (tt_age + 1) & 0xFF;
+    timed_out.store(false, std::memory_order_relaxed);
+    deadline = std::chrono::steady_clock::now() +
+               std::chrono::milliseconds(static_cast<int64_t>(time_limit_sec * 1000));
+
+    FastBoard board(fb);
+    int wp = 0, bp = 0;
+    for (int i = 0; i < TOTAL_SQUARES; ++i)
+    {
+        int p = board.grid[i];
+        int pt = std::abs(p);
+        if (p && pt != 2 && pt != 7)
+            (p > 0 ? wp : bp)++;
+    }
+
+    // ThreadData is several MB (cont_history) -- keep it off the stack.
+    auto td = std::make_unique<ThreadData>();
+    td->clear();
+    depth = std::max(1, depth);
+
+    for (uint32_t move : MoveGenerator::generate_legal_moves(board))
+    {
+        int fr, fc, tr, tc, cap;
+        MoveGenerator::unpack_move(move, fr, fc, tr, tc, cap);
+        int8_t piece = board.grid[FastBoard::sq(fr, fc)];
+        bool is_dk = (std::abs(piece) == 7);
+        bool is_promo = is_dk && ((piece > 0 && tr == 6) || (piece < 0 && tr == 0));
+        int nwp = wp, nbp = bp;
+        if (cap && std::abs(cap) != 2 && std::abs(cap) != 7)
+            (cap > 0 ? nwp : nbp)--;
+        if (is_promo)
+            (piece > 0 ? nwp : nbp)++;
+        int chm = (cap || is_promo) ? 0 : halfmove_clock + 1;
+
+        board.make_move(move, zobrist);
+        int val = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE, 1, true, nwp, nbp, 0, chm, *td);
+        board.unmake_move();
+        if (timed_out.load(std::memory_order_relaxed))
+            break;
+        out.emplace_back(move, val);
+    }
+    return out;
 }
 
 int Searcher::evaluate_board(const FastBoard &fb, int halfmove_clock)
@@ -1981,6 +2177,9 @@ void DuelEngine::_bind_methods()
     ClassDB::bind_method(D_METHOD("set_board", "board_array", "turn"), &DuelEngine::set_board);
     ClassDB::bind_method(D_METHOD("find_best_move", "max_depth", "time_limit", "halfmove_clock", "num_threads"), &DuelEngine::find_best_move, DEFVAL(-1));
     ClassDB::bind_method(D_METHOD("get_recommended_threads"), &DuelEngine::get_recommended_threads);
+    ClassDB::bind_method(D_METHOD("score_moves", "depth", "time_limit", "halfmove_clock"), &DuelEngine::score_moves);
+    ClassDB::bind_method(D_METHOD("get_position_key"), &DuelEngine::get_position_key);
+    ClassDB::bind_method(D_METHOD("set_repetition_history", "keys"), &DuelEngine::set_repetition_history);
     ClassDB::bind_method(D_METHOD("evaluate_position", "halfmove_clock"), &DuelEngine::evaluate_position);
     ClassDB::bind_method(D_METHOD("get_legal_moves", "row", "col"), &DuelEngine::get_legal_moves);
     ClassDB::bind_method(D_METHOD("get_piece_moves", "row", "col"), &DuelEngine::get_piece_moves);
@@ -2112,6 +2311,42 @@ Dictionary DuelEngine::find_best_move(int max_depth, double time_limit, int half
     else
         result["error"] = "No legal moves";
     return result;
+}
+
+Array DuelEngine::score_moves(int depth, double time_limit, int halfmove_clock)
+{
+    Array out;
+    auto scored = searcher->score_root_moves(board, depth, time_limit, halfmove_clock);
+    for (auto &ms : scored)
+    {
+        int fr, fc, tr, tc, cap;
+        MoveGenerator::unpack_move(ms.first, fr, fc, tr, tc, cap);
+        Dictionary d;
+        d["from_row"] = fr;
+        d["from_col"] = fc;
+        d["to_row"] = tr;
+        d["to_col"] = tc;
+        d["score"] = ms.second; // side-to-move relative
+        out.append(d);
+    }
+    return out;
+}
+
+int64_t DuelEngine::get_position_key()
+{
+    return static_cast<int64_t>(board.zhash);
+}
+
+void DuelEngine::set_repetition_history(const Array &keys)
+{
+    std::vector<uint64_t> v;
+    v.reserve(keys.size());
+    for (int i = 0; i < keys.size(); ++i)
+    {
+        int64_t k = keys[i];
+        v.push_back(static_cast<uint64_t>(k));
+    }
+    searcher->set_game_history(std::move(v));
 }
 
 int DuelEngine::get_recommended_threads()

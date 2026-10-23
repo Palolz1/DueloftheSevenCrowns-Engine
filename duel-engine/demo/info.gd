@@ -1,4 +1,5 @@
 #Info.gd
+# "Pieces" reference overlay: pick a piece to see where it moves.
 extends CanvasLayer
 
 var _piece_codes = ["wK", "wN", "wC", "wP", "wM", "wD", "wL", "wW"]
@@ -7,136 +8,151 @@ var _piece_names = {
 	"wM": "Marshal", "wD": "Donkey", "wL": "Lancer", "wW": "Warden"
 }
 var _piece_descriptions = {
-	"wK": "Moves 1 tile in any direction.",
-	"wN": "Standard knight (2+1 L-shape).",
-	"wC": "Bishop that can also move 1 tile in any direcion.",
-	"wP": "Stronger knight (3+1) plus 1-step left/right/up/down.",
-	"wM": "Moves like a Rook plus knight.",
-	"wD": "Moves diagonally forward 1 (empty) or straight forward 1 to capture. Promotes to Lancer on back rank.",
-	"wL": "Moves to any tile exactly 2 away (King distance of 2).",
-	"wW": "Moves to any tile within 2 tiles (like a short-range queen)."
+	"wK": "Moves 1 square in any direction.",
+	"wN": "Standard knight: an L-shaped jump (2 + 1).",
+	"wC": "Slides diagonally like a bishop, and can also step 1 square straight.",
+	"wP": "A longer knight jump (3 + 1), plus a 1-square step left, right, up or down.",
+	"wM": "Slides straight like a rook, and also jumps like a knight.",
+	"wD": "Moves 1 square diagonally forward onto an empty square, captures 1 square straight ahead. Promotes to a Lancer on the far rank.",
+	"wL": "Jumps to any square exactly 2 away (straight, diagonal or knight-shaped).",
+	"wW": "Moves to any square within 2 steps: 1 in any direction, or 2 straight.",
 }
 
-var _panel: Panel
-var _grid_container: GridContainer
-var _preview_board: Node2D
+const CELL := 58
+const BOARD_POS := Vector2(640, 150)
+
+var _root: Control
+var _preview: Control
+var _name_label: Label
 var _description_label: Label
-var _title_label: Label
-var _hovered_piece: String = ""
+var _buttons := {}
+var _selected := ""
 
-var _cell_size = 60
-var _board_offset = Vector2(400, 80)
-
-var _texture_cache = {}
-
-# Reused across hovers instead of constructing a new DuelEngine (and its
-# 64MB SharedTT) on every mouse_entered — this panel only ever needs
-# get_piece_attack_squares() on a single-piece board, never a search,
-# so one cached instance is all that's required.
+# Reused instead of building a DuelEngine (and its 64MB table) per click;
+# only get_piece_attack_squares() on a single-piece board is ever needed.
 var _preview_engine: DuelEngine = null
+
+
+class Preview:
+	extends Control
+	var code := ""
+	var targets: Array = []
+	var cell := 58
+
+	func _draw():
+		var light := Color("#e8dcc2")
+		var dark := Color("#a27d58")
+		var bg := StyleBoxFlat.new()
+		bg.bg_color = Color("#1a1f33")
+		bg.set_corner_radius_all(12)
+		draw_style_box(bg, Rect2(Vector2(-14, -14), Vector2(cell * 7 + 28, cell * 7 + 28)))
+		for r in 7:
+			for c in 7:
+				draw_rect(Rect2(c * cell, r * cell, cell, cell), light if (r + c) % 2 == 0 else dark)
+		draw_rect(Rect2(-3, -3, cell * 7 + 6, cell * 7 + 6), Color("#e2b65a"), false, 2.0)
+		for t in targets:
+			var ctr := Vector2(t.y * cell + cell / 2.0, t.x * cell + cell / 2.0)
+			draw_rect(Rect2(t.y * cell, t.x * cell, cell, cell), Color("#3cc08d", 0.35))
+			draw_circle(ctr, cell * 0.14, Color("#0d1323", 0.55))
+
 
 func _get_preview_engine() -> DuelEngine:
 	if _preview_engine == null:
 		_preview_engine = DuelEngine.new()
 	return _preview_engine
 
+
 func _ready():
+	layer = 5
 	visible = false
 	_create_ui()
 
+
 func _create_ui():
-	_panel = Panel.new()
-	_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	var style = StyleBoxFlat.new()
-	style.bg_color = Color(0.05, 0.05, 0.08, 0.97)
-	_panel.add_theme_stylebox_override("panel", style)
-	add_child(_panel)
-	
-	_title_label = Label.new()
-	_title_label.text = "Piece Reference — Press I to close"
-	_title_label.add_theme_font_size_override("font_size", 28)
-	_title_label.add_theme_color_override("font_color", Color("#e94560"))
-	_title_label.position = Vector2(50, 30)
-	add_child(_title_label)
-	
-	_grid_container = GridContainer.new()
-	_grid_container.columns = 2
-	_grid_container.position = Vector2(50, 100)
-	_grid_container.size = Vector2(300, 500)
-	add_child(_grid_container)
-	
+	_root = Control.new()
+	_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(_root)
+	var bg := ColorRect.new()
+	bg.color = UITheme.INK
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_root.add_child(bg)
+
+	var title := UITheme.label("The Pieces", 36, UITheme.GOLD_LIGHT, UITheme.display(700))
+	title.position = Vector2(110, 52)
+	_root.add_child(title)
+	var sub := UITheme.label("Pick a piece to see where it can move from the centre of the board.", 15, UITheme.TEXT_DIM, UITheme.ui(500))
+	sub.position = Vector2(112, 104)
+	_root.add_child(sub)
+
+	var close := UITheme.button("Close  (I)", "secondary", 15, 40)
+	close.position = Vector2(1050, 52)
+	close.size = Vector2(130, 40)
+	close.pressed.connect(toggle)
+	_root.add_child(close)
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 12)
+	grid.add_theme_constant_override("v_separation", 12)
+	grid.position = Vector2(110, 160)
+	_root.add_child(grid)
+	var group := ButtonGroup.new()
 	for code in _piece_codes:
-		var btn = Button.new()
-		btn.text = _piece_names[code]
-		btn.custom_minimum_size = Vector2(140, 50)
-		btn.add_theme_font_size_override("font_size", 16)
-		btn.mouse_entered.connect(func(): _on_piece_hover(code))
-		btn.mouse_exited.connect(func(): _on_piece_unhover())
-		_grid_container.add_child(btn)
-	
-	_preview_board = Node2D.new()
-	_preview_board.position = _board_offset
-	add_child(_preview_board)
-	
-	_description_label = Label.new()
-	_description_label.text = "Hover over a piece to see its moves."
-	_description_label.add_theme_font_size_override("font_size", 16)
-	_description_label.add_theme_color_override("font_color", Color("#e2e8f0"))
-	_description_label.position = Vector2(400, 500)
-	_description_label.size = Vector2(400, 100)
+		var b := UITheme.pill("", UITheme.GOLD, 16, 64)
+		b.custom_minimum_size = Vector2(220, 64)
+		b.button_group = group
+		var row := UITheme.hbox(12)
+		row.set_anchors_preset(Control.PRESET_FULL_RECT)
+		row.offset_left = 12
+		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		b.add_child(row)
+		var tok := UITheme.piece_token(code, 42)
+		tok.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(tok)
+		var nm := UITheme.label(_piece_names[code], 17, UITheme.TEXT, UITheme.ui(600))
+		nm.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		row.add_child(nm)
+		b.toggled.connect(func(on): if on: _show_piece(code))
+		b.mouse_entered.connect(func(): _show_piece(code))
+		grid.add_child(b)
+		_buttons[code] = b
+
+	_preview = Preview.new()
+	_preview.cell = CELL
+	_preview.position = BOARD_POS
+	_preview.size = Vector2(CELL * 7, CELL * 7)
+	_root.add_child(_preview)
+
+	_name_label = UITheme.label("", 24, UITheme.GOLD_LIGHT, UITheme.display(700))
+	_name_label.position = Vector2(110, 480)
+	_root.add_child(_name_label)
+	_description_label = UITheme.label("", 16, UITheme.TEXT, UITheme.ui(500))
+	_description_label.position = Vector2(110, 520)
+	_description_label.size = Vector2(450, 140)
 	_description_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	add_child(_description_label)
+	_root.add_child(_description_label)
 
-func _on_piece_hover(code: String):
-	_hovered_piece = code
-	_description_label.text = _piece_names[code] + "\n" + _piece_descriptions[code]
-	_draw_preview_board(code)
+	_buttons["wK"].button_pressed = true
 
-func _on_piece_unhover():
-	_hovered_piece = ""
-	_description_label.text = "Hover over a piece to see its moves."
-	for child in _preview_board.get_children():
-		child.queue_free()
 
-func _draw_preview_board(code: String):
-	for child in _preview_board.get_children():
-		child.queue_free()
-	
-	for r in range(7):
-		for c in range(7):
-			var rect = ColorRect.new()
-			rect.position = Vector2(c * _cell_size, r * _cell_size)
-			rect.size = Vector2(_cell_size, _cell_size)
-			rect.color = Color("#e8d5b5") if (r + c) % 2 == 0 else Color("#b58863")
-			_preview_board.add_child(rect)
-	
-	var center_r = 3
-	var center_c = 3
-	var piece = _create_piece_sprite(center_r, center_c, code)
-	_preview_board.add_child(piece)
-	
+func _show_piece(code: String):
+	_selected = code
+	_name_label.text = _piece_names[code]
+	_description_label.text = _piece_descriptions[code]
+	for ch in _preview.get_children():
+		ch.queue_free()
 	var engine = _get_preview_engine()
-	var board = _make_single_piece_board(code, center_r, center_c)
-	engine.set_board(board, "white")
-	var moves = engine.get_piece_attack_squares(center_r, center_c)
-	
-	for m in moves:
-		var target_r = m["to_row"]
-		var target_c = m["to_col"]
-		var highlight = ColorRect.new()
-		highlight.position = Vector2(target_c * _cell_size, target_r * _cell_size)
-		highlight.size = Vector2(_cell_size, _cell_size)
-		
-		if m.get("capture", false):
-			if m.get("is_friendly", false):
-				highlight.color = Color("#3b82f6")
-			else:
-				highlight.color = Color("#e879f9")
-		else:
-			highlight.color = Color("#4ade80")
-		
-		highlight.modulate = Color(1, 1, 1, 0.4)
-		_preview_board.add_child(highlight)
+	engine.set_board(_make_single_piece_board(code, 3, 3), "white")
+	var targets: Array = []
+	for m in engine.get_piece_attack_squares(3, 3):
+		targets.append(Vector2i(m["to_row"], m["to_col"]))
+	_preview.targets = targets
+	_preview.queue_redraw()
+	var tok := UITheme.piece_token(code, 50)
+	tok.position = Vector2(3 * CELL + (CELL - 50) / 2.0, 3 * CELL + (CELL - 50) / 2.0)
+	_preview.add_child(tok)
+
 
 func _make_single_piece_board(code: String, r: int, c: int) -> Array:
 	var b = []
@@ -148,64 +164,8 @@ func _make_single_piece_board(code: String, r: int, c: int) -> Array:
 	b[r][c] = code
 	return b
 
-func _create_piece_sprite(r: int, c: int, code: String) -> Node2D:
-	var image_name = _get_image_name(code)
-	var container = Node2D.new()
-	var center = Vector2(c * _cell_size + _cell_size / 2, r * _cell_size + _cell_size / 2)
-	container.position = center
-	
-	var token = Panel.new()
-	var token_size = 44
-	token.position = Vector2(-token_size / 2, -token_size / 2)
-	token.size = Vector2(token_size, token_size)
-	var token_style = StyleBoxFlat.new()
-	token_style.bg_color = Color("#e2e8f0") if code.begins_with("w") else Color("#1e293b")
-	token_style.corner_radius_top_left = token_size / 2
-	token_style.corner_radius_top_right = token_size / 2
-	token_style.corner_radius_bottom_left = token_size / 2
-	token_style.corner_radius_bottom_right = token_size / 2
-	token.add_theme_stylebox_override("panel", token_style)
-	container.add_child(token)
-	
-	var texture = _get_texture(image_name)
-	var sprite = Sprite2D.new()
-	sprite.texture = texture
-	sprite.scale = Vector2(1.2, 1.2)
-	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	container.add_child(sprite)
-	
-	return container
-
-func _get_image_name(code: String) -> String:
-	match code:
-		"wK", "bK": return "king"
-		"wN", "bN": return "knight"
-		"wC", "bC": return "cardinal"
-		"wP", "bP": return "paladin"
-		"wM", "bM": return "marshal"
-		"wD", "bD": return "donkey"
-		"wL", "bL": return "lancer"
-		"wW", "bW": return "warden"
-	return ""
-
-func _get_texture(image_name: String) -> Texture2D:
-	if image_name in _texture_cache:
-		return _texture_cache[image_name]
-	
-	var path = "res://piecepng/" + image_name + ".png"
-	var texture = load(path) as Texture2D
-	if texture == null:
-		push_error("Failed to load piece texture: " + path)
-		texture = PlaceholderTexture2D.new()
-		texture.size = Vector2(32, 32)
-	
-	_texture_cache[image_name] = texture
-	return texture
 
 func toggle():
 	visible = not visible
-	if not visible:
-		_hovered_piece = ""
-		_description_label.text = "Hover over a piece to see its moves."
-		for child in _preview_board.get_children():
-			child.queue_free()
+	if visible and _selected != "":
+		_show_piece(_selected)

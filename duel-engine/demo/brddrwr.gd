@@ -11,9 +11,18 @@ var _drag_start: Vector2i = Vector2i(-1, -1)
 var _drag_end: Vector2i = Vector2i(-1, -1)
 var _arrows: Array = []
 var _highlights: Array = []
+# Mirrors BoardRenderer.flipped. Arrows/highlights are stored in BOARD
+# squares, so they stay on the right squares when the board is flipped.
+var flipped := false
+
+func set_flipped(f: bool):
+	flipped = f
+	queue_redraw()
+
 func _ready():
 	z_index = 100
-	mouse_filter = Control.MOUSE_FILTER_PASS
+	# Never block clicks for the UI underneath; right-drag handling uses _input.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	# Size to cover the board exactly so hit-testing is correct
 	size = Vector2(BOARD_SQUARES * SQUARE_SIZE, BOARD_SQUARES * SQUARE_SIZE)
 
@@ -32,6 +41,10 @@ func _input(event: InputEvent):
 		clear_arrows()
 		return
 
+	var info = get_parent().get_parent().get_node_or_null("Info")
+	if info != null and info.visible:
+		return
+
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
 		if event.pressed:
 			var sq = _pixel_to_square(get_global_mouse_position())
@@ -39,10 +52,8 @@ func _input(event: InputEvent):
 				_is_dragging = true
 				_drag_start = sq
 				_drag_end = sq
-				mouse_filter = Control.MOUSE_FILTER_STOP
 				queue_redraw()
 		else:
-			mouse_filter = Control.MOUSE_FILTER_PASS
 			_is_dragging = false
 			var from = _drag_start
 			var to = _pixel_to_square(get_global_mouse_position())
@@ -83,9 +94,13 @@ func _toggle_arrow(from_sq: Vector2i, to_sq: Vector2i):
 # Returns (-1,-1) if outside the board.
 func _pixel_to_square(global_pos: Vector2) -> Vector2i:
 	var local = global_pos - global_position
+	if local.x < 0 or local.y < 0:
+		return Vector2i(-1, -1)
 	var col = int(local.x / SQUARE_SIZE)
 	var row = int(local.y / SQUARE_SIZE)
 	if col >= 0 and col < BOARD_SQUARES and row >= 0 and row < BOARD_SQUARES:
+		if flipped:
+			return Vector2i(6 - col, 6 - row)
 		return Vector2i(col, row)
 	return Vector2i(-1, -1)
 
@@ -93,9 +108,10 @@ func _pixel_to_square(global_pos: Vector2) -> Vector2i:
 # Returns the center of a square in LOCAL coordinates.
 # sq.x = col, sq.y = row
 func _square_center(sq: Vector2i) -> Vector2:
+	var v := Vector2i(6 - sq.x, 6 - sq.y) if flipped else sq
 	return Vector2(
-		sq.x * SQUARE_SIZE + SQUARE_SIZE * 0.5,
-		sq.y * SQUARE_SIZE + SQUARE_SIZE * 0.5
+		v.x * SQUARE_SIZE + SQUARE_SIZE * 0.5,
+		v.y * SQUARE_SIZE + SQUARE_SIZE * 0.5
 	)
 
 func _is_l_move(from_sq: Vector2i, to_sq: Vector2i) -> bool:

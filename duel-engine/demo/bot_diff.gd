@@ -3,7 +3,8 @@ extends Node
 
 @onready var game_state = get_parent()
 
-const MIN_THINK_TIME := .95
+# Minimum time a bot "thinks" so moves don't appear instantly (tests set 0).
+var min_think_time := 0.95
 
 # ──────────────────────────────────────────────────────────────────
 # Human-likeness tuning. Each difficulty has:
@@ -24,8 +25,26 @@ const MIN_THINK_TIME := .95
 #   slip_max_loss_cp       : eval loss cap for slip band.
 #
 #   forcing_gap_cp         : tactical-commitment threshold.
+#   fsf_skill              : Fairy-Stockfish "Skill Level" (0-20) used for
+#                            the bot's own "best move" search. Below 20 the
+#                            engine itself picks slightly weaker moves, on top
+#                            of the human-like bands above.
+#
+# The ladder (weakest -> strongest) is shown in the setup screen as seven
+# crowns: beginner, novice, easy, medium, hard, expert, impossible.
 # ──────────────────────────────────────────────────────────────────
 const HUMAN_PROFILES := {
+	"novice": {
+		"depth": 2,
+		"blunder_prob": 0.25,
+		"blunder_band": [0.0, 0.40],
+		"plausible_prob": 0.45,
+		"plausible_max_loss_cp": 150.0,
+		"slip_prob": 0.22,
+		"slip_max_loss_cp": 300.0,
+		"forcing_gap_cp": 300.0,
+		"fsf_skill": 0,
+	},
 	"easy": {
 		"depth": 3,
 		"blunder_prob": 0.20,
@@ -35,6 +54,7 @@ const HUMAN_PROFILES := {
 		"slip_prob": 0.20,
 		"slip_max_loss_cp": 200.0,
 		"forcing_gap_cp": 220.0,
+		"fsf_skill": 5,
 	},
 	"medium": {
 		"depth": 8,
@@ -45,6 +65,7 @@ const HUMAN_PROFILES := {
 		"slip_prob": 0.16,
 		"slip_max_loss_cp": 130.0,
 		"forcing_gap_cp": 160.0,
+		"fsf_skill": 6,
 	},
 	"hard": {
 		"depth": 13,
@@ -56,6 +77,7 @@ const HUMAN_PROFILES := {
 		"slip_max_loss_cp": 70.0,
 		"forcing_gap_cp": 90.0,
 		"avoid_en_prise": true,
+		"fsf_skill": 15,
 	},
 	"cautious": {
 		"depth": 8,
@@ -67,8 +89,27 @@ const HUMAN_PROFILES := {
 		"slip_max_loss_cp": 80.0,
 		"forcing_gap_cp": 125.0,
 		"avoid_en_prise": true,
+		"fsf_skill": 12,
 	},
 }
+
+# Candidate moves are ranked with a short real search (every legal move gets
+# its own depth-N search) instead of the static eval of the position after
+# the move. The static eval can't see the reply, so "my paladin can be taken
+# next turn" looked like a near-best move and got picked as a "plausible" or
+# "slip" choice. Falls back to static ranking if the search runs out of time.
+const RANK_SEARCH_DEPTH := 3
+const RANK_SEARCH_TIME := 0.6
+# Same ranking when Fairy-Stockfish is doing the searching (its depths are
+# much "cheaper" than DuelEngine's, so it gets a deeper one for similar cost).
+const FAIRY_RANK_DEPTH := 6
+
+# Opening safety: for the first OPENING_SAFE_PLIES plies (turns 1-4) the
+# human-like bots never take the deliberate "blunder" roll, and any
+# plausible/slip alternative must lose at most OPENING_MAX_LOSS_CP versus the
+# best ranked move. They still vary their openings, they just don't hang pieces.
+const OPENING_SAFE_PLIES := 8
+const OPENING_MAX_LOSS_CP := 40.0
 
 const MOOD_PERSISTENCE := 0.8
 var _mood := {"white": 0.0, "black": 0.0}
@@ -84,6 +125,10 @@ func request_bot_move(difficulty: String, time_limit: float) -> Dictionary:
 	match difficulty:
 		"beginner":
 			result = _beginner_bot_move(time_limit)
+		"novice":
+			result = _human_like_move(time_limit, HUMAN_PROFILES["novice"], "Novice")
+		"expert":
+			result = _expert_bot_move(time_limit)
 		"easy":
 			result = _easy_bot_move(time_limit)
 		"medium":
@@ -100,7 +145,7 @@ func request_bot_move(difficulty: String, time_limit: float) -> Dictionary:
 			result = _roulette_bot_move(time_limit)
 
 	var elapsed_ms = Time.get_ticks_msec() - start_time
-	var remaining_ms = int(MIN_THINK_TIME * 1000) - elapsed_ms
+	var remaining_ms = int(min_think_time * 1000) - elapsed_ms
 	if remaining_ms > 0:
 		OS.delay_msec(remaining_ms)
 	return result
@@ -152,10 +197,11 @@ func _human_like_move(time_limit: float, profile: Dictionary, bot_name: String, 
 		depth_delta = -1
 	var depth = max(1, int(profile.depth) + depth_delta)
 
-	var best = game_state.engine.find_best_move(depth, time_limit, hm, game_state.search_threads)
+	var best = game_state.search_best(depth, time_limit, int(profile.get("fsf_skill", 20)))
 	if not best.has("from_row"):
 		print("[", bot_name, "] ", color, " | Move ", game_state.move_history.size(), " | NO LEGAL MOVES")
 		return _random_legal_move()
+	_report_eval(best, color)
 
 	if perfect_piece_type != "":
 		var moved_piece = game_state.board[best.from_row][best.from_col]
@@ -169,8 +215,12 @@ func _human_like_move(time_limit: float, profile: Dictionary, bot_name: String, 
 		print("[", bot_name, "] ", color, " | Move ", game_state.move_history.size(), " | Only 1 move, playing it")
 		return best
 
-	var ranked = _static_rank_moves(all_moves, hm, color)
+	var ranked = _search_rank_moves(all_moves, hm, color)
 	var is_forcing = _is_forcing(best, ranked, color, profile.forcing_gap_cp)
+	var in_opening = game_state.move_history.size() < OPENING_SAFE_PLIES
+	# Loss is measured against the top of the SAME ranking (same search depth),
+	# not against best.score, which comes from a much deeper search.
+	var top_score = float(ranked[ranked.size() - 1]["score"])
 
 	print("[", bot_name, "] ", color, " | Move ", game_state.move_history.size(),
 		" | Mood: ", snapped(mood, 0.01), " | Depth: ", depth,
@@ -184,6 +234,8 @@ func _human_like_move(time_limit: float, profile: Dictionary, bot_name: String, 
 	var mood_mult = lerp(1.6, 0.4, (mood + 1.0) / 2.0)
 
 	var blunder_prob = clamp(profile.blunder_prob * mood_mult, 0.0, 0.80)
+	if in_opening:
+		blunder_prob = 0.0
 	var slip_prob = clamp(profile.slip_prob * mood_mult, 0.0, 0.60)
 	var plausible_prob = clamp(profile.plausible_prob * mood_mult, 0.0, 0.95 - blunder_prob - slip_prob)
 
@@ -194,6 +246,12 @@ func _human_like_move(time_limit: float, profile: Dictionary, bot_name: String, 
 		slip_prob *= scale
 		plausible_prob *= scale
 
+	var slip_cap = profile.slip_max_loss_cp
+	var plausible_cap = profile.plausible_max_loss_cp
+	if in_opening:
+		slip_cap = minf(slip_cap, OPENING_MAX_LOSS_CP)
+		plausible_cap = minf(plausible_cap, OPENING_MAX_LOSS_CP)
+
 	var roll = randf()
 	var band_name := "best"
 	var picked: Dictionary = best
@@ -203,30 +261,54 @@ func _human_like_move(time_limit: float, profile: Dictionary, bot_name: String, 
 		picked = _pick_blunder_move(ranked, profile.blunder_band)
 	elif roll < blunder_prob + slip_prob:
 		band_name = "slip"
-		picked = _pick_from_band(ranked, [4, 6], best, profile.slip_max_loss_cp, profile.forcing_gap_cp, color, profile)
+		picked = _pick_from_band(ranked, [4, 6], top_score, slip_cap, profile.forcing_gap_cp, color, profile)
 		if picked.is_empty():
 			picked = best
 			band_name = "best (slip filtered)"
 	elif roll < blunder_prob + slip_prob + plausible_prob:
 		band_name = "plausible"
-		picked = _pick_from_band(ranked, [2, 3], best, profile.plausible_max_loss_cp, profile.forcing_gap_cp, color, profile)
+		picked = _pick_from_band(ranked, [2, 3], top_score, plausible_cap, profile.forcing_gap_cp, color, profile)
 		if picked.is_empty():
 			picked = best
 			band_name = "best (plausible filtered)"
 
-	var loss = best.score - picked.score
+	var loss = 0.0 if picked == best else top_score - float(picked.score)
 
 	print("[", bot_name, "] ", color, " | Move ", game_state.move_history.size(),
 		" | Band: ", band_name,
 		" | Best eval: ", snapped(best.score, 0.1),
 		" | Played eval: ", snapped(picked.score, 0.1),
 		" | Loss: ", snapped(loss, 0.1), " cp",
-		" | Rank: ", ranked.find(picked) + 1, "/", ranked.size(),
+		" | Rank: ", ranked.size() - _index_of_move(ranked, picked), "/", ranked.size(),
 		" | Probs: B=", snapped(blunder_prob * 100, 0.1),
 		"% S=", snapped(slip_prob * 100, 0.1),
 		"% P=", snapped(plausible_prob * 100, 0.1), "%")
 
 	return picked
+
+# Ranks moves worst -> best (mover-relative centipawns) using a short real
+# search of each move. See RANK_SEARCH_DEPTH above.
+func _search_rank_moves(moves: Array, hm: int, color: String) -> Array:
+	var scored: Array = game_state.score_all_moves(RANK_SEARCH_DEPTH, FAIRY_RANK_DEPTH, RANK_SEARCH_TIME)
+	if scored.size() < moves.size():
+		print("[BotDiff] move-ranking search ran out of time, using static ranking")
+		return _static_rank_moves(moves, hm, color)
+	scored.sort_custom(func(a, b): return a["score"] < b["score"])
+	return scored
+
+# Index of move `m` in `ranked`, matched by squares (the engine's result
+# dictionaries carry extra keys, so Array.find() never matches them).
+func _index_of_move(ranked: Array, m: Dictionary) -> int:
+	for i in ranked.size():
+		var e = ranked[i]
+		if e.from_row == m.from_row and e.from_col == m.from_col and e.to_row == m.to_row and e.to_col == m.to_col:
+			return i
+	return ranked.size()
+
+# Hands the bot's own search of the current position to GameState so the
+# eval bar/history shows a searched score while bots are playing.
+func _report_eval(result: Dictionary, color: String) -> void:
+	game_state.call_deferred("report_search_eval", result, color, game_state.move_history.size())
 
 func _static_rank_moves(moves: Array, hm: int, color: String) -> Array:
 	var eval_engine = _get_eval_engine()
@@ -239,7 +321,8 @@ func _static_rank_moves(moves: Array, hm: int, color: String) -> Array:
 		var temp_board = _apply_move_to_board(m, game_state.board)
 
 		eval_engine.set_board(temp_board, next_turn)
-		var new_hm = 0 if (captured != "" or piece.ends_with("D")) else hm + 1
+		var promotes = piece.ends_with("D") and m.to_row == (6 if piece.begins_with("w") else 0)
+		var new_hm = 0 if (captured != "" or promotes) else hm + 1
 		var white_score = eval_engine.evaluate_position(new_hm)
 		var mover_score = white_score if color == "white" else -white_score
 
@@ -275,12 +358,11 @@ func _pick_blunder_move(ranked: Array, band: Array) -> Dictionary:
 	var idx = min_idx + (randi() % pool_size)
 	return ranked[idx]
 
-func _pick_from_band(ranked: Array, band: Array, best: Dictionary, max_loss: float, forcing_gap: float, mover_color: String, profile: Dictionary) -> Dictionary:
+func _pick_from_band(ranked: Array, band: Array, best_score: float, max_loss: float, forcing_gap: float, mover_color: String, profile: Dictionary) -> Dictionary:
 	var n = ranked.size()
 	if n < 2:
 		return {}
 
-	var best_score = best.score
 	var min_rank = band[0]
 	var max_rank = band[1]
 
@@ -369,10 +451,11 @@ func _piece_count() -> int:
 	return count
 
 func _roulette_bot_move(time_limit: float) -> Dictionary:
-	var best = game_state.engine.find_best_move(12, time_limit, game_state.halfmove_clock, game_state.search_threads)
+	var best = game_state.search_best(12, time_limit)
 	if not best.has("from_row"):
 		print("[Roulette] ", game_state.turn, " | Move ", game_state.move_history.size(), " | No legal moves")
 		return _random_legal_move()
+	_report_eval(best, game_state.turn)
 
 	var all_moves = _get_all_legal_moves()
 	if all_moves.size() <= 1:
@@ -471,13 +554,27 @@ func _shepherd_bot_move(time_limit: float) -> Dictionary:
 	return _human_like_move(time_limit, HUMAN_PROFILES["medium"], "Shepherd", "D")
 
 func _impossible_bot_move(time_limit: float) -> Dictionary:
-	var result = game_state.engine.find_best_move(40, time_limit, game_state.halfmove_clock, game_state.search_threads)
+	var result = game_state.search_best(40, time_limit)
 	if result.has("from_row"):
+		_report_eval(result, game_state.turn)
 		print("[Impossible] ", game_state.turn, " | Move ", game_state.move_history.size(),
 			" | Depth reached: ", result.get("depth", "?"), " | Eval: ", snapped(result.score, 0.1),
 			" | Nodes: ", result.get("nodes", "?"), " | Time: ", snapped(result.get("time_ms", 0), 0.1), "ms")
 	else:
 		print("[Impossible] ", game_state.turn, " | Move ", game_state.move_history.size(), " | No legal moves")
+	return result
+
+# Expert: the engine with no deliberate "human" mistakes, a short think and
+# Skill Level 18 (Impossible is the same engine at full skill with far more
+# time). At full skill the two were nearly even in calibration games.
+const EXPERT_SKILL := 18
+
+func _expert_bot_move(time_limit: float) -> Dictionary:
+	var result = game_state.search_best(0, time_limit, EXPERT_SKILL)
+	if result.has("from_row"):
+		_report_eval(result, game_state.turn)
+		print("[Expert] ", game_state.turn, " | Move ", game_state.move_history.size(),
+			" | Depth: ", result.get("depth", "?"), " | Eval: ", result.score)
 	return result
 
 func _random_legal_move() -> Dictionary:

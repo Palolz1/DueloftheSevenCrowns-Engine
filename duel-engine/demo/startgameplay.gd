@@ -7,6 +7,18 @@ extends Node2D
 @onready var ui_controller = $UIcontroller
 @onready var piece_animator = $BoardRenderer/PieceAnimator
 
+const BOT_TYPES := ["beginner", "novice", "easy", "medium", "hard", "expert", "impossible", "roulette", "cautious", "shepherd"]
+# Multiplies every bot's think time (calibration tests run bots faster).
+var bot_time_scale := 1.0
+
+# Top-left of the squares in the 1280x800 design viewport (UIcontroller lays
+# the player bars and sidebar out around this).
+const BOARD_ORIGIN := Vector2(138, 116)
+
+# Board orientation. false: White's back rank at the top (the classic view of
+# this game); true: rotated 180 degrees so White is at the bottom.
+var flipped := false
+
 var white_player = "human"
 var black_player = "human"
 var game_type = "untimed"
@@ -18,8 +30,8 @@ var _hovered_square: Array = []
 var _is_animating: bool = false
 
 func _ready():
-	# Center board on the left side, leaving room for the side panel
-	board_renderer.position = Vector2(80, 60)
+	get_tree().root.theme = UITheme.make_theme()
+	board_renderer.position = BOARD_ORIGIN
 	await get_tree().process_frame  # wait one frame so CanvasLayer children are ready
 	ui_controller.align_drawer_to_board(board_renderer.global_position)
 	game_state.board_changed.connect(_on_board_changed)
@@ -40,10 +52,22 @@ func _process(delta: float) -> void:
 		ui_controller.update_grace(game_state.turn, game_state.turn_grace_remaining, game_state.TURN_GRACE_PERIOD)
 
 func _input(event):
-	if event is InputEventKey and event.pressed and event.keycode == KEY_I:
-		var info = get_node_or_null("Info")
-		if info != null:
-			info.toggle()
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_I:
+			var info = get_node_or_null("Info")
+			if info != null:
+				info.toggle()
+		elif event.keycode == KEY_F and board_renderer.visible:
+			toggle_flip()
+
+func toggle_flip():
+	flipped = not flipped
+	_apply_orientation()
+
+func _apply_orientation():
+	board_renderer.flipped = flipped
+	ui_controller.set_orientation(flipped)
+	_on_board_changed()
 
 func _show_player_setup():
 	board_renderer.visible = false
@@ -57,7 +81,18 @@ func _on_players_selected(w_type: String, b_type: String, g_type: String, standa
 	white_player = w_type
 	black_player = b_type
 	game_type = g_type
+	ui_controller.reset_for_new_game()
 	ui_controller.set_player_labels(white_player, black_player)
+
+	# Human vs bot: the human's pieces start at the bottom of the screen.
+	# Otherwise keep the classic view (White at the top).
+	var white_human: bool = white_player == "human"
+	var black_human: bool = black_player == "human"
+	if white_human != black_human:
+		flipped = white_human
+	else:
+		flipped = false
+	_apply_orientation()
 
 	match game_type:
 		"untimed":
@@ -77,6 +112,7 @@ func _on_players_selected(w_type: String, b_type: String, g_type: String, standa
 	_winner = ""
 	_hovered_square = []
 	_on_board_changed()
+	ui_controller.update_turn(game_state.turn)
 	_start_turn()
 	SFXhandler.play("newgame")
 
@@ -97,7 +133,7 @@ func _on_board_changed():
 		_winner,
 		_hovered_square
 	)
-	ui_controller.update_eval(game_state.current_eval_score, false)
+	ui_controller.update_eval(game_state.current_eval_score, false, game_state.current_eval_mate)
 
 func _get_hover_moves() -> Array:
 	if _hovered_square.is_empty():
@@ -160,15 +196,14 @@ func _on_game_ended(reason: String, winner: String):
 	_game_over_reason = reason
 	_winner = winner
 	game_state.stop_hint_search()
-	ui_controller.show_game_over(reason, winner)
-	_on_board_changed()
+	_on_board_changed()  # (UIcontroller shows the result card itself)
 
 func _start_turn():
 	if game_state.game_over:
 		return
 	var current_player = white_player if game_state.turn == "white" else black_player
 	_update_hint_state()
-	if current_player in ["beginner", "easy", "medium", "hard", "impossible", "roulette", "cautious", "shepherd"]:
+	if current_player in BOT_TYPES:
 		_schedule_bot_move(current_player)
 	else:
 		input_handler.set_process_input(true)
@@ -194,20 +229,24 @@ func _schedule_bot_move(player_type: String):
 	var time_limit: float
 	match player_type:
 		"beginner":   time_limit = 0.85
+		"novice":     time_limit = 1.0
 		"easy":       time_limit = 1.25
 		"medium":     time_limit = 3.0
 		"hard":       time_limit = 5.0
-		"impossible": time_limit = 15.0
+		"expert":     time_limit = 1.5
+		"impossible": time_limit = 12.0
 		"roulette":   time_limit = 4.0
 		"cautious":   time_limit = 6.0
 		"shepherd":   time_limit = 4.0
+
+	time_limit *= bot_time_scale
 
 	# In timed games, don't let a bot think longer than half of what it
 	# has left on the clock, so it can never flag itself on a slow move.
 	if game_state.clock_enabled:
 		var remaining: float = game_state.white_time_remaining if game_state.turn == "white" else game_state.black_time_remaining
 		if remaining > 0.0:
-			time_limit = min(time_limit, max(0.1, remaining * 0.5))
+			time_limit = min(time_limit, max(0.1, remaining * 0.4))
 
 	await get_tree().create_timer(0.05).timeout
 	await _do_bot_move(player_type, time_limit)
