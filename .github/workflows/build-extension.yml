@@ -65,12 +65,16 @@ jobs:
           SCONS_CACHE: ${{ github.workspace }}/.scons-cache
         run: scons platform=${{ matrix.platform }} target=template_release -j2
 
+      # Upload ONLY this platform's binaries. The checkout also contains the
+      # previously committed binaries of the other platforms; uploading those
+      # too made the merge in commit-binaries overwrite fresh builds with
+      # stale copies (whichever artifact happened to be extracted last won).
       - name: Upload extension binaries
         uses: actions/upload-artifact@v4
         with:
           name: duelengine-${{ matrix.platform }}
           path: |
-            duel-engine/demo/bin/*
+            duel-engine/demo/bin/libduelengine.${{ matrix.platform }}.*
             !duel-engine/demo/bin/*.a
             !duel-engine/demo/bin/*.lib
             !duel-engine/demo/bin/*.exp
@@ -179,7 +183,9 @@ jobs:
           find duel-engine/demo/bin -type f -exec sha256sum {} \;
           echo "::endgroup::"
           for f in duel-engine/demo/bin/libduelengine.windows.template_debug.x86_64.dll \
-                   duel-engine/demo/bin/libduelengine.windows.template_release.x86_64.dll; do
+                   duel-engine/demo/bin/libduelengine.windows.template_release.x86_64.dll \
+                   duel-engine/demo/bin/libduelengine.linux.template_release.x86_64.so \
+                   duel-engine/demo/bin/libduelengine.macos.template_release.framework/libduelengine.macos.template_release; do
             if [ ! -f "$f" ]; then
               echo "::error::Expected artifact file missing after download: $f"
             fi
