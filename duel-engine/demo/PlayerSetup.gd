@@ -34,6 +34,12 @@ const PERSONALITIES: Array[Dictionary] = [
 	{ "id": "roulette", "label": "Roulette", "desc": "Every move is either the best or the worst, 50/50", "accent": Color("#a77bf2") },
 	{ "id": "cautious", "label": "Cautious", "desc": "Never blunders on purpose, plays it safe", "accent": Color("#3fc1d9") },
 	{ "id": "shepherd", "label": "Shepherd", "desc": "Flawless with its donkeys, human with everything else", "accent": Color("#ec6aa6") },
+	{ "id": "random", "label": "Random", "desc": "Picks any legal move completely at random", "accent": Color("#94a3b8") },
+	{ "id": "berserker", "label": "Berserker", "desc": "Captures whenever it can, no matter the cost", "accent": Color("#ef5a4f") },
+	{ "id": "pacifist", "label": "Pacifist", "desc": "Refuses to capture unless it has no other move", "accent": Color("#7fd6a8") },
+	{ "id": "mirror", "label": "Mirror", "desc": "Copies your last move (rotated) whenever it legally can", "accent": Color("#7cb7ff") },
+	{ "id": "stampede", "label": "Stampede", "desc": "Always pushes a donkey if one can move", "accent": Color("#d9a35b") },
+	{ "id": "wanderer", "label": "Wanderer", "desc": "Takes its king for a walk whenever it can afford to", "accent": Color("#f2d16b") },
 ]
 
 const GAME_TYPES: Array[Dictionary] = [
@@ -283,7 +289,10 @@ func _add_player_card(parent: Node, color: String):
 		bot_box.add_child(b)
 		choices[lv.id] = b
 	bot_box.add_child(UITheme.heading("Personalities"))
-	var prow := UITheme.hbox(8)
+	var prow := GridContainer.new()
+	prow.columns = 3
+	prow.add_theme_constant_override("h_separation", 8)
+	prow.add_theme_constant_override("v_separation", 8)
 	bot_box.add_child(prow)
 	for p in PERSONALITIES:
 		var b := UITheme.pill(p.label, p.accent, 13, 32)

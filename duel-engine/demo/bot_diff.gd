@@ -143,6 +143,18 @@ func request_bot_move(difficulty: String, time_limit: float) -> Dictionary:
 			result = _impossible_bot_move(time_limit)
 		"roulette":
 			result = _roulette_bot_move(time_limit)
+		"random":
+			result = _random_bot_move()
+		"berserker":
+			result = _berserker_bot_move()
+		"pacifist":
+			result = _pacifist_bot_move()
+		"mirror":
+			result = _mirror_bot_move()
+		"stampede":
+			result = _stampede_bot_move()
+		"wanderer":
+			result = _wanderer_bot_move()
 
 	var elapsed_ms = Time.get_ticks_msec() - start_time
 	var remaining_ms = int(min_think_time * 1000) - elapsed_ms
@@ -576,6 +588,75 @@ func _expert_bot_move(time_limit: float) -> Dictionary:
 		print("[Expert] ", game_state.turn, " | Move ", game_state.move_history.size(),
 			" | Depth: ", result.get("depth", "?"), " | Eval: ", result.score)
 	return result
+
+# ──────────────────────────────────────────────────────────────────
+# Personalities. Apart from Random they all start from the engine's
+# ranking of every legal move (worst -> best) and then follow their quirk.
+# A forced mate is always taken -- the quirk never throws away a win.
+# ──────────────────────────────────────────────────────────────────
+const MATE_THRESHOLD := 900000
+
+# Random: any legal move, uniformly at random. No engine involved at all.
+func _random_bot_move() -> Dictionary:
+	var m = _random_legal_move()
+	print("[Random] ", game_state.turn, " | Move ", game_state.move_history.size(), " | ", m)
+	return m
+
+func _ranked_now() -> Array:
+	var moves = _get_all_legal_moves()
+	if moves.is_empty():
+		return []
+	return _search_rank_moves(moves, game_state.halfmove_clock, game_state.turn)
+
+func _is_capture(m: Dictionary) -> bool:
+	return game_state.board[m.to_row][m.to_col] != ""
+
+# Best ranked move that satisfies `wants`; when no move does, the best move
+# overall. A mating move always wins over the quirk.
+func _quirk_pick(name: String, ranked: Array, wants: Callable, max_loss_cp: float = INF) -> Dictionary:
+	if ranked.is_empty():
+		return {}
+	var top: Dictionary = ranked[ranked.size() - 1]
+	if float(top.score) >= MATE_THRESHOLD:
+		print("[", name, "] ", game_state.turn, " | Move ", game_state.move_history.size(), " | mate on the board, taking it")
+		return top
+	for i in range(ranked.size() - 1, -1, -1):
+		var m: Dictionary = ranked[i]
+		if wants.call(m) and float(top.score) - float(m.score) <= max_loss_cp:
+			print("[", name, "] ", game_state.turn, " | Move ", game_state.move_history.size(),
+				" | quirk move, loss ", float(top.score) - float(m.score), " cp")
+			return m
+	print("[", name, "] ", game_state.turn, " | Move ", game_state.move_history.size(), " | no quirk move, playing best")
+	return top
+
+# Berserker: if anything can be captured, it captures (the best capture).
+func _berserker_bot_move() -> Dictionary:
+	return _quirk_pick("Berserker", _ranked_now(), func(m): return _is_capture(m))
+
+# Pacifist: never captures unless every legal move is a capture.
+func _pacifist_bot_move() -> Dictionary:
+	return _quirk_pick("Pacifist", _ranked_now(), func(m): return not _is_capture(m))
+
+# Stampede: always moves a donkey when one can move.
+func _stampede_bot_move() -> Dictionary:
+	return _quirk_pick("Stampede", _ranked_now(),
+		func(m): return game_state.board[m.from_row][m.from_col].ends_with("D"))
+
+# Wanderer: takes its king for a walk whenever that doesn't cost much.
+const WANDERER_MAX_LOSS_CP := 150.0
+func _wanderer_bot_move() -> Dictionary:
+	return _quirk_pick("Wanderer", _ranked_now(),
+		func(m): return game_state.board[m.from_row][m.from_col].ends_with("K"), WANDERER_MAX_LOSS_CP)
+
+# Mirror: copies the opponent's last move, rotated 180 degrees (the starting
+# position is symmetric that way), whenever that move is legal.
+func _mirror_bot_move() -> Dictionary:
+	var lm = game_state.last_move
+	var ranked := _ranked_now()
+	if lm == null:
+		return _quirk_pick("Mirror", ranked, func(m): return false)
+	var want := [6 - lm[0][0], 6 - lm[0][1], 6 - lm[1][0], 6 - lm[1][1]]
+	return _quirk_pick("Mirror", ranked, func(m): return [m.from_row, m.from_col, m.to_row, m.to_col] == want)
 
 func _random_legal_move() -> Dictionary:
 	var all_moves = _get_all_legal_moves()

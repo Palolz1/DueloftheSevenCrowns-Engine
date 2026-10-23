@@ -7,7 +7,8 @@ extends Node2D
 @onready var ui_controller = $UIcontroller
 @onready var piece_animator = $BoardRenderer/PieceAnimator
 
-const BOT_TYPES := ["beginner", "novice", "easy", "medium", "hard", "expert", "impossible", "roulette", "cautious", "shepherd"]
+const BOT_TYPES := ["beginner", "novice", "easy", "medium", "hard", "expert", "impossible",
+	"roulette", "cautious", "shepherd", "random", "berserker", "pacifist", "mirror", "stampede", "wanderer"]
 # Multiplies every bot's think time (calibration tests run bots faster).
 var bot_time_scale := 1.0
 
@@ -238,6 +239,7 @@ func _schedule_bot_move(player_type: String):
 		"roulette":   time_limit = 4.0
 		"cautious":   time_limit = 6.0
 		"shepherd":   time_limit = 4.0
+		_:            time_limit = 1.0  # personalities that only rank moves
 
 	time_limit *= bot_time_scale
 
