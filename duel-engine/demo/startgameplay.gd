@@ -71,6 +71,8 @@ func _process(delta: float) -> void:
 		ui_controller.update_grace(game_state.turn, game_state.turn_grace_remaining, game_state.TURN_GRACE_PERIOD)
 
 func _input(event):
+	if _settings_page != null:
+		return   # settings page open: no board shortcuts
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_I:
 			var info = get_node_or_null("Info")
@@ -474,12 +476,24 @@ func record_game_result(winner: String) -> String:
 func open_settings():
 	if _settings_page != null:
 		return
+	# The in-game sidebar is a CanvasLayer (layer 1), so the page needs a
+	# higher layer of its own to cover it; z_index doesn't cross layers.
+	var holder := CanvasLayer.new()
+	holder.layer = 20
+	get_tree().root.add_child(holder)
 	_settings_page = preload("res://settings_page.gd").new()
 	_settings_page.changed.connect(_on_settings_changed)
 	_settings_page.closed.connect(func():
-		_settings_page.queue_free()
-		_settings_page = null)
-	get_tree().root.add_child(_settings_page)
+		holder.queue_free()
+		_settings_page = null
+		input_handler.set_process_input(not _bot_scheduled)
+		if ui_controller.board_drawer != null:
+			ui_controller.board_drawer.set_process_input(true))
+	holder.add_child(_settings_page)
+	# no clicks or right-click arrows reach the board underneath
+	input_handler.set_process_input(false)
+	if ui_controller.board_drawer != null:
+		ui_controller.board_drawer.set_process_input(false)
 
 func _on_settings_changed():
 	ui_controller.refresh_settings()
