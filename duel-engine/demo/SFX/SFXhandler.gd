@@ -1,6 +1,10 @@
 #SFXhandler.gd
 extends Node
 
+# Autoloads are compiled before the editor has registered every class_name,
+# so load the settings script directly instead of using the Settings name.
+const SettingsScript = preload("res://settings.gd")
+
 var _streams: Dictionary = {}
 var _player: AudioStreamPlayer
 
@@ -26,9 +30,9 @@ func _preload_sfx():
 
 func play(sfx_name: String):
 	if sfx_name in _streams:
-		if int(Settings.get_value("sound_volume")) <= 0:
+		if int(SettingsScript.get_value("sound_volume")) <= 0:
 			return
-		_player.volume_db = Settings.volume_db()
+		_player.volume_db = SettingsScript.volume_db()
 		_player.stream = _streams[sfx_name]
 		_player.play()
 	else:
