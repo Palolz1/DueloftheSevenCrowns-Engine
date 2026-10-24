@@ -63,6 +63,8 @@ func _input(event):
 				info.toggle()
 		elif event.keycode == KEY_F and board_renderer.visible:
 			toggle_flip()
+		elif event.keycode == KEY_E and board_renderer.visible:
+			ui_controller.toggle_eval()
 		elif game_state.game_over and board_renderer.visible and not game_state.snapshots.is_empty():
 			var last: int = game_state.snapshots.size() - 1
 			var cur: int = review_ply if review_ply >= 0 else last

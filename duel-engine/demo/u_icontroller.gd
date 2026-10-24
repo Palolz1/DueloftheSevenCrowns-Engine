@@ -252,6 +252,11 @@ var bottom_bar: PlayerBar
 var _bars := {}            # "white"/"black" -> PlayerBar
 var _eval_bar: EvalBar
 var _eval_graph: EvalGraph
+var _eval_box: VBoxContainer     # bar + graph, hidden when the eval is turned off
+var _eval_hidden_label: Label
+var _eval_toggle_btn: Button
+var eval_visible := true         # saved in user://settings.cfg
+const SETTINGS_PATH := "user://settings.cfg"
 var _moves_grid: GridContainer
 var _moves_scroll: ScrollContainer
 var _game_over_layer: Control = null
@@ -350,10 +355,25 @@ func _create_ui():
 	status_label.visible = false
 	col.add_child(status_label)
 
-	# Evaluation
-	col.add_child(UITheme.heading("Evaluation"))
+	# Evaluation (can be hidden so a game isn't spoiled by the engine)
+	var eval_head := UITheme.hbox(8)
+	col.add_child(eval_head)
+	var eh := UITheme.heading("Evaluation")
+	eh.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	eval_head.add_child(eh)
+	_eval_hidden_label = UITheme.label("hidden", 12, UITheme.TEXT_FAINT, UITheme.ui(500))
+	_eval_hidden_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	eval_head.add_child(_eval_hidden_label)
+	eval_head.add_child(UITheme.spacer())
+	_eval_toggle_btn = UITheme.button("Hide", "ghost", 12, 24)
+	_eval_toggle_btn.custom_minimum_size.x = 58
+	_eval_toggle_btn.tooltip_text = "Show or hide the evaluation bar and graph (E)"
+	_eval_toggle_btn.pressed.connect(toggle_eval)
+	eval_head.add_child(_eval_toggle_btn)
+	_eval_box = UITheme.vbox(10)
+	col.add_child(_eval_box)
 	var eval_row := UITheme.hbox(12)
-	col.add_child(eval_row)
+	_eval_box.add_child(eval_row)
 	_eval_bar = EvalBar.new()
 	_eval_bar.custom_minimum_size = Vector2(0, 14)
 	_eval_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -367,7 +387,9 @@ func _create_ui():
 	_eval_graph.custom_minimum_size = Vector2(0, 104)
 	_eval_graph.cap = EVAL_GRAPH_CAP
 	_eval_graph.min_bound = EVAL_GRAPH_MIN_BOUND
-	col.add_child(_eval_graph)
+	_eval_box.add_child(_eval_graph)
+	_load_settings()
+	_apply_eval_visible()
 
 	# Moves
 	col.add_child(UITheme.heading("Moves"))
@@ -437,6 +459,33 @@ func _create_ui():
 	new_game_btn = UITheme.button("New game", "primary", 16, 44)
 	new_game_btn.pressed.connect(_on_new_game)
 	col.add_child(new_game_btn)
+
+
+# ---- Evaluation on/off -------------------------------------------------
+# Hiding only affects what is drawn: the engine keeps evaluating, so the
+# graph is complete if the player turns it back on (e.g. in review).
+func toggle_eval():
+	set_eval_visible(not eval_visible)
+
+func set_eval_visible(on: bool):
+	eval_visible = on
+	_apply_eval_visible()
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_PATH)   # keep any other settings in the file
+	cfg.set_value("display", "show_eval", on)
+	cfg.save(SETTINGS_PATH)
+
+func _apply_eval_visible():
+	if _eval_box == null:
+		return
+	_eval_box.visible = eval_visible
+	_eval_hidden_label.visible = not eval_visible
+	_eval_toggle_btn.text = "Hide" if eval_visible else "Show"
+
+func _load_settings():
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_PATH) == OK:
+		eval_visible = bool(cfg.get_value("display", "show_eval", true))
 
 
 # Shows the starting-position name in the header ("" for Classic).
