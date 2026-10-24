@@ -99,7 +99,7 @@ const LIST := [
 	 "rows": ["wC wN wP wK wW wN .", "wD wD wD wD wD wD wD", ". . . . . . .", ". . . . . . .", ". . . . . . .", "bD bD bD bD bD bD bD", "bC bN bP bK bW bN bM"]},
 	{"id": "knightmare", "category": "uneven", "name": "Knightmare",
 	 "desc": "Black gets four Paladins and a wall of Knights. White's b and f donkeys start as Lancers to fight back.",
-	 "verdict": "Black +8", "tone": "black",
+	 "verdict": "Black +7", "tone": "black",
 	 "rows": ["wC wN wP wK wW wN wM", "wD wL wD wD wD wL wD", ". . . . . . .", ". . . . . . .", ". . . . . . .", "bN bN bN bN bN bN bN", "bP bN bP bK bP bN bP"]},
 	{"id": "lancer_brigade", "category": "uneven", "name": "Lancer Brigade",
 	 "desc": "Black's back rank is six Lancers. White has exactly one first move that saves the game. Can you find it?",
@@ -200,7 +200,7 @@ static func make_board(id: String) -> Array:
 
 
 # Fairy-Stockfish FEN (White to move) for a board in the game's format.
-static func board_to_fen(board: Array) -> String:
+static func board_to_fen(board: Array, side: String = "white") -> String:
 	var ranks := []
 	for r in range(6, -1, -1):
 		var s := ""
@@ -218,4 +218,4 @@ static func board_to_fen(board: Array) -> String:
 		if empty > 0:
 			s += str(empty)
 		ranks.append(s)
-	return "/".join(ranks) + " w - - 0 1"
+	return "/".join(ranks) + (" w" if side == "white" else " b") + " - - 0 1"

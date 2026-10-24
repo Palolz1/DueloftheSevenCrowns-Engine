@@ -26,6 +26,9 @@ func _preload_sfx():
 
 func play(sfx_name: String):
 	if sfx_name in _streams:
+		if int(Settings.get_value("sound_volume")) <= 0:
+			return
+		_player.volume_db = Settings.volume_db()
 		_player.stream = _streams[sfx_name]
 		_player.play()
 	else:

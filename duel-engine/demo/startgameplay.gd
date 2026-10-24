@@ -33,8 +33,23 @@ var _is_animating: bool = false
 # GameState.snapshots), or -1 while playing.
 var review_ply := -1
 
+# Puzzle mode (see puzzles.gd)
+var puzzle_active := false
+var puzzle: Dictionary = {}
+var puzzle_step := 0          # index into puzzle.line of the next move
+var puzzle_color := "white"   # the side the player solves for
+var puzzle_clean := true      # no mistakes and no hint so far
+var _puzzle_busy := false     # scripted moves / take-back in progress
+var _puzzle_done := false
+
+# Records: each finished game is counted once (keyed by GameState.game_gen).
+var _recorded_gen := -1
+var _record_note := ""
+var _settings_page: Control = null
+
 func _ready():
 	get_tree().root.theme = UITheme.make_theme()
+	Settings.apply_window()
 	board_renderer.position = BOARD_ORIGIN
 	await get_tree().process_frame  # wait one frame so CanvasLayer children are ready
 	ui_controller.align_drawer_to_board(board_renderer.global_position)
@@ -63,8 +78,10 @@ func _input(event):
 				info.toggle()
 		elif event.keycode == KEY_F and board_renderer.visible:
 			toggle_flip()
-		elif event.keycode == KEY_E and board_renderer.visible:
+		elif event.keycode == KEY_E and board_renderer.visible and not puzzle_active:
 			ui_controller.toggle_eval()
+		elif event.keycode == KEY_Z and (event.ctrl_pressed or event.meta_pressed) and board_renderer.visible:
+			undo_move()
 		elif game_state.game_over and board_renderer.visible and not game_state.snapshots.is_empty():
 			var last: int = game_state.snapshots.size() - 1
 			var cur: int = review_ply if review_ply >= 0 else last
@@ -106,10 +123,12 @@ func _show_player_setup():
 	ui_controller.visible = false
 	player_setup = preload("res://PlayerSetup.tscn").instantiate()
 	player_setup.players_selected.connect(_on_players_selected)
+	player_setup.puzzle_selected.connect(start_puzzle)
 	get_tree().root.add_child(player_setup)  # Add to viewport root
 	player_setup.set_anchors_preset(Control.PRESET_FULL_RECT)
 
 func _on_players_selected(w_type: String, b_type: String, g_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float, scenario_id: String = "classic"):
+	_leave_puzzle_mode()
 	white_player = w_type
 	black_player = b_type
 	game_type = g_type
@@ -179,7 +198,7 @@ func _on_board_changed():
 	ui_controller.update_eval(game_state.current_eval_score, false, game_state.current_eval_mate)
 
 func _get_hover_moves() -> Array:
-	if _hovered_square.is_empty():
+	if _hovered_square.is_empty() or not Settings.get_value("hover_preview"):
 		return []
 	var r = _hovered_square[0]
 	var c = _hovered_square[1]
@@ -189,7 +208,7 @@ func _get_hover_moves() -> Array:
 	return game_state.engine.get_piece_attack_squares(r, c)
 
 func _on_square_clicked(r: int, c: int):
-	if game_state.game_over or _bot_scheduled or _is_animating:
+	if game_state.game_over or _bot_scheduled or _is_animating or _puzzle_busy:
 		return
 	var current_player = white_player if game_state.turn == "white" else black_player
 	if current_player != "human":
@@ -220,6 +239,8 @@ func _on_square_clicked(r: int, c: int):
 
 	_is_animating = false
 	game_state.execute_move(move.from_r, move.from_c, move.to_r, move.to_c)
+	if puzzle_active:
+		_puzzle_after_move()
 
 func _on_square_hovered(r: int, c: int):
 	if _is_animating:
@@ -231,10 +252,15 @@ func _on_square_hovered(r: int, c: int):
 	_on_board_changed()
 
 func _on_turn_changed(new_turn: String):
+	_update_undo_button()
 	if not _bot_scheduled:
 		_start_turn()
 
 func _on_game_ended(reason: String, winner: String):
+	_update_undo_button()
+	if puzzle_active:
+		game_state.stop_hint_search()
+		return   # handled by _puzzle_after_move / the solution playback
 	_bot_scheduled = false
 	_game_over_reason = reason
 	_winner = winner
@@ -245,7 +271,8 @@ func _on_game_ended(reason: String, winner: String):
 	_on_board_changed()  # (UIcontroller shows the result card itself)
 
 func _start_turn():
-	if game_state.game_over:
+	_update_undo_button()
+	if game_state.game_over or puzzle_active:
 		return
 	var current_player = white_player if game_state.turn == "white" else black_player
 	_update_hint_state()
@@ -314,25 +341,35 @@ func _do_bot_move(player_type: String, time_limit: float):
 	if result.is_empty() or gen != game_state.game_gen:
 		return
 
-	_is_animating = true
-	var piece = game_state.get_piece_at(result.from_row, result.from_col)
-	var captured = game_state.get_piece_at(result.to_row, result.to_col)
+	await _animate_and_play(result.from_row, result.from_col, result.to_row, result.to_col)
 
-	_render_with_skip([[result.from_row, result.from_col]])
+# Animates a move, then plays it (unless the game was reset or a move was
+# taken back meanwhile). Used for bot moves and scripted puzzle moves.
+func _animate_and_play(fr: int, fc: int, tr: int, tc: int) -> bool:
+	var gen: int = game_state.game_gen
+	_is_animating = true
+	var piece = game_state.get_piece_at(fr, fc)
+	var captured = game_state.get_piece_at(tr, tc)
+
+	_render_with_skip([[fr, fc]])
 
 	if captured != "":
-		piece_animator.animate_capture(result.from_row, result.from_col, result.to_row, result.to_col, piece, captured)
+		piece_animator.animate_capture(fr, fc, tr, tc, piece, captured)
 		await piece_animator.capture_finished
 	else:
-		piece_animator.animate_move(result.from_row, result.from_col, result.to_row, result.to_col, piece)
+		piece_animator.animate_move(fr, fc, tr, tc, piece)
 		await piece_animator.move_finished
 
 	if gen != game_state.game_gen:
-		return   # board was reset during the animation
+		return false   # board was reset during the animation
 	_is_animating = false
-	game_state.execute_move(result.from_row, result.from_col, result.to_row, result.to_col)
+	game_state.execute_move(fr, fc, tr, tc)
+	return true
 
 func new_game():
+	if puzzle_active:
+		preload("res://PlayerSetup.gd").open_puzzles_next = true   # back to the puzzle list
+	_leave_puzzle_mode()
 	review_ply = -1
 	game_state.review_hint_arrow = null
 	_bot_scheduled = false
@@ -361,3 +398,253 @@ func _render_with_skip(skip_squares: Array):
 		_hovered_square,
 		skip_squares
 	)
+
+
+# ---------------------------------------------------------------------------
+# Undo
+# ---------------------------------------------------------------------------
+# Plies to take back so it is a person's turn again, or 0 if undo isn't
+# allowed right now (timed games, bot vs bot, puzzles, finished games).
+func _undo_plies_needed() -> int:
+	if puzzle_active or game_state.game_over or game_type != "untimed":
+		return 0
+	var plies: int = game_state.snapshots.size() - 1
+	if plies <= 0:
+		return 0
+	var white_h: bool = white_player == "human"
+	var black_h: bool = black_player == "human"
+	if white_h and black_h:
+		return 1
+	if not white_h and not black_h:
+		return 0
+	var human := "white" if white_h else "black"
+	# Bot to move (thinking, or about to): take back just your move.
+	# Your move: take back the bot's reply and your move before it.
+	var n := 1 if game_state.turn != human else 2
+	return n if plies >= n else 0
+
+func _update_undo_button():
+	ui_controller.set_undo_enabled(_undo_plies_needed() > 0)
+
+func undo_move():
+	var n := _undo_plies_needed()
+	if n <= 0:
+		return
+	if not game_state.undo_plies(n):
+		return
+	# a bot that was thinking/animating has been cancelled by undo_plies()
+	_bot_scheduled = false
+	_is_animating = false
+	piece_animator._kill_active()
+	_hovered_square = []
+	input_handler.set_process_input(true)
+	ui_controller.on_undo()
+	_on_board_changed()
+	_start_turn()
+
+
+# ---------------------------------------------------------------------------
+# Records against the seven nobles
+# ---------------------------------------------------------------------------
+# Called by the UI when a game ends; returns a line for the result card
+# ("Record vs The Duke: 3–1–0") or "" when the game doesn't count.
+func record_game_result(winner: String) -> String:
+	if puzzle_active:
+		return ""
+	if _recorded_gen == game_state.game_gen:
+		return _record_note
+	_recorded_gen = game_state.game_gen
+	_record_note = ""
+	if not Records.counts_for_record(white_player, black_player, game_state.scenario_id):
+		return ""
+	var human := "white" if white_player == "human" else "black"
+	var bot: String = black_player if human == "white" else white_player
+	var result := "draw"
+	if winner != "":
+		result = "win" if winner.to_lower() == human else "loss"
+	Records.add_result(bot, result, human)
+	var lvl := UITheme.LEVEL_IDS.find(bot)
+	_record_note = "Record vs The %s: %s" % [UITheme.LEVEL_TITLES[lvl], Records.short_text(bot)]
+	return _record_note
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+func open_settings():
+	if _settings_page != null:
+		return
+	_settings_page = preload("res://settings_page.gd").new()
+	_settings_page.changed.connect(_on_settings_changed)
+	_settings_page.closed.connect(func():
+		_settings_page.queue_free()
+		_settings_page = null)
+	get_tree().root.add_child(_settings_page)
+
+func _on_settings_changed():
+	ui_controller.refresh_settings()
+	_on_board_changed()
+
+
+# ---------------------------------------------------------------------------
+# Puzzles
+# ---------------------------------------------------------------------------
+func start_puzzle(id: String):
+	var p := Puzzles.get_puzzle(id)
+	if p.is_empty():
+		return
+	if player_setup != null and is_instance_valid(player_setup):
+		player_setup.queue_free()
+		player_setup = null
+	var start := Puzzles.fen_to_start(p.fen)
+	puzzle = p
+	puzzle_active = true
+	puzzle_step = 0
+	puzzle_color = start.turn
+	puzzle_clean = true
+	_puzzle_busy = false
+	_puzzle_done = false
+	review_ply = -1
+	_bot_scheduled = false
+	_is_animating = false
+	_game_over_reason = ""
+	_winner = ""
+	_hovered_square = []
+	white_player = "human" if puzzle_color == "white" else "puzzle"
+	black_player = "human" if puzzle_color == "black" else "puzzle"
+	game_type = "untimed"
+	game_state.custom_start = start
+	game_state.scenario_id = "classic"
+	game_state.reset_game()
+	game_state.setup_clock("untimed", 0.0, 0.0)
+	ui_controller.reset_for_new_game()
+	ui_controller.set_mode_name("Puzzle " + p.id.to_upper())
+	ui_controller.set_player_labels(white_player, black_player)
+	ui_controller.set_clocks_visible(false)
+	ui_controller.hint_toggle.button_pressed = false
+	var moves_to_find: int = (p.line.size() + 1) / 2
+	var prompt := "%s to move. " % puzzle_color.capitalize()
+	match p.theme:
+		"win": prompt += "One move wins material. Find it."
+		"mate1": prompt += "Checkmate in one move."
+		_: prompt += "Force checkmate in %d moves." % moves_to_find
+	var solved := Puzzles.status(p.id) in ["solved", "clean"]
+	ui_controller.set_puzzle_mode(true, Puzzles.theme_name(p.theme), prompt)
+	if solved:
+		ui_controller.set_puzzle_feedback("Already solved. Play it again?", UITheme.TEXT_FAINT)
+	flipped = puzzle_color == "white"   # your side at the bottom
+	_apply_orientation()
+	board_renderer.visible = true
+	ui_controller.visible = true
+	_on_board_changed()
+	ui_controller.update_turn(game_state.turn, false)
+	input_handler.set_process_input(true)
+	SFXhandler.play("newgame")
+
+func _leave_puzzle_mode():
+	if not puzzle_active:
+		return
+	puzzle_active = false
+	puzzle = {}
+	_puzzle_busy = false
+	game_state.custom_start = {}
+	ui_controller.set_puzzle_mode(false)
+
+func _puzzle_after_move():
+	var gen: int = game_state.game_gen
+	var played: String = game_state.uci_moves.back()
+	var expected: String = puzzle.line[puzzle_step]
+	var won: bool = game_state.game_over and _winner_is_solver()
+	if played == expected or won:
+		puzzle_step += 1
+		if won or puzzle_step >= puzzle.line.size():
+			_puzzle_solved()
+			return
+		ui_controller.set_puzzle_feedback("Good move! Keep going.", UITheme.EMERALD)
+		_puzzle_busy = true
+		await get_tree().create_timer(0.45).timeout
+		if gen != game_state.game_gen or not puzzle_active:
+			return
+		await _play_puzzle_reply()
+		_puzzle_busy = false
+	else:
+		puzzle_clean = false
+		ui_controller.set_puzzle_feedback("Not the right move. Try again.", UITheme.RUBY)
+		_puzzle_busy = true
+		await get_tree().create_timer(0.7).timeout
+		if gen != game_state.game_gen or not puzzle_active:
+			return
+		game_state.undo_plies(1)
+		ui_controller.on_undo()
+		_puzzle_busy = false
+		_on_board_changed()
+
+func _winner_is_solver() -> bool:
+	# no legal moves / checkmate for the side to move = the solver just won
+	return game_state.game_over and game_state.turn != puzzle_color and not game_state.is_threefold_repetition() and game_state.halfmove_clock < 40 and not game_state.engine.is_insufficient_material()
+
+# The computer's scripted defence (next move in the line).
+func _play_puzzle_reply():
+	if puzzle_step >= puzzle.line.size():
+		return
+	var m := Puzzles.uci_to_move(puzzle.line[puzzle_step])
+	puzzle_step += 1
+	await _animate_and_play(m.from_row, m.from_col, m.to_row, m.to_col)
+
+func _puzzle_solved():
+	_puzzle_done = true
+	game_state.game_over = true
+	game_state.stop_hint_search()
+	Puzzles.set_status(puzzle.id, "clean" if puzzle_clean else "solved")
+	var msg := "Solved!" if puzzle_clean else "Solved, after a little help."
+	ui_controller.set_puzzle_feedback("%s  %d of %d puzzles done." % [msg, Puzzles.solved_count(), Puzzles.LIST.size()], UITheme.EMERALD)
+	ui_controller.set_puzzle_buttons(false)
+	_update_undo_button()
+	_on_board_changed()
+	SFXhandler.play("checkmate" if puzzle.theme != "win" else "promotion")
+
+func puzzle_hint():
+	if not puzzle_active or _puzzle_done or _puzzle_busy or game_state.turn != puzzle_color:
+		return
+	puzzle_clean = false
+	var m := Puzzles.uci_to_move(puzzle.line[puzzle_step])
+	game_state.select_square(m.from_row, m.from_col)
+	ui_controller.set_puzzle_feedback("Hint: move the highlighted piece.", UITheme.GOLD_LIGHT)
+
+func puzzle_show_solution():
+	if not puzzle_active or _puzzle_done or _puzzle_busy:
+		return
+	puzzle_clean = false
+	_puzzle_busy = true
+	var gen: int = game_state.game_gen
+	Puzzles.set_status(puzzle.id, "revealed")
+	ui_controller.set_puzzle_feedback("Here is the solution.", UITheme.GOLD_LIGHT)
+	game_state.selected_square = []
+	game_state.legal_moves = []
+	while puzzle_step < puzzle.line.size():
+		await get_tree().create_timer(0.55).timeout
+		if gen != game_state.game_gen or not puzzle_active:
+			return
+		var m := Puzzles.uci_to_move(puzzle.line[puzzle_step])
+		puzzle_step += 1
+		var ok: bool = await _animate_and_play(m.from_row, m.from_col, m.to_row, m.to_col)
+		if not ok:
+			return
+	_puzzle_busy = false
+	_puzzle_done = true
+	game_state.game_over = true
+	ui_controller.set_puzzle_buttons(false)
+	_on_board_changed()
+
+func next_puzzle():
+	if _puzzle_busy and not _puzzle_done:
+		return
+	var nid := Puzzles.next_unsolved(puzzle.get("id", ""))
+	if nid == "":
+		# everything solved: just go to the next one in the list
+		var idx := 0
+		for i in Puzzles.LIST.size():
+			if Puzzles.LIST[i].id == puzzle.get("id", ""):
+				idx = (i + 1) % Puzzles.LIST.size()
+		nid = Puzzles.LIST[idx].id
+	start_puzzle(nid)

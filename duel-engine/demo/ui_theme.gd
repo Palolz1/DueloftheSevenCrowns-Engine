@@ -229,3 +229,50 @@ static func piece_token(code: String, diameter: float = 40.0) -> Control:
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	holder.add_child(tr)
 	return holder
+
+# Full-screen page frame used by the Starting Positions, Puzzles, Records
+# and Settings pages: background, title, subtitle and a Back button.
+# Returns {"body": VBoxContainer, "back": Button, "head": HBoxContainer}.
+static func page_shell(page: Control, title: String, subtitle: String) -> Dictionary:
+	page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	page.mouse_filter = Control.MOUSE_FILTER_STOP
+	var bg := ColorRect.new()
+	bg.color = INK
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	page.add_child(bg)
+	var margin := MarginContainer.new()
+	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
+	for side in ["left", "right"]:
+		margin.add_theme_constant_override("margin_" + side, 64)
+	margin.add_theme_constant_override("margin_top", 28)
+	margin.add_theme_constant_override("margin_bottom", 24)
+	page.add_child(margin)
+	var main := vbox(14)
+	margin.add_child(main)
+	var head := hbox(16)
+	main.add_child(head)
+	var titles := vbox(2)
+	titles.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(titles)
+	titles.add_child(label(title, 34, GOLD_LIGHT, display(700)))
+	titles.add_child(label(subtitle, 15, TEXT_DIM, ui(500)))
+	var back := button("Back", "secondary", 15, 40)
+	back.custom_minimum_size.x = 110
+	back.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	head.add_child(back)
+	return {"body": main, "back": back, "head": head}
+
+# On/off switch styled like the rest of the UI.
+static func switch(text: String, on: bool) -> CheckButton:
+	var t := CheckButton.new()
+	t.text = text
+	t.button_pressed = on
+	t.focus_mode = Control.FOCUS_NONE
+	t.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	t.add_theme_font_override("font", ui(550))
+	t.add_theme_font_size_override("font_size", 15)
+	t.add_theme_color_override("font_color", TEXT_DIM)
+	t.add_theme_color_override("font_hover_color", TEXT)
+	t.add_theme_color_override("font_pressed_color", TEXT)
+	t.add_theme_color_override("font_hover_pressed_color", TEXT)
+	return t

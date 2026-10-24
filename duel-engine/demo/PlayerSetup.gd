@@ -4,6 +4,7 @@
 extends Control
 
 signal players_selected(white_type: String, black_type: String, game_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float, scenario_id: String)
+signal puzzle_selected(id: String)
 
 # Choices survive "New game" (the screen is rebuilt each time).
 static var _saved := {
@@ -78,6 +79,7 @@ var _arma_row: Control
 var scenario_id := "classic"
 var _scenario_btn: Button
 var _scenario_page: Control = null
+var _overlay: Control = null   # Puzzles / Records / Settings page
 
 
 func _ready():
@@ -92,6 +94,9 @@ func _ready():
 	armageddon_black_minutes = _saved.arma_black
 	scenario_id = _saved.scenario
 	_build_ui()
+	if open_puzzles_next:
+		open_puzzles_next = false
+		_open_overlay.call_deferred("Puzzles")
 
 
 func _build_ui():
@@ -131,7 +136,6 @@ func _build_ui():
 
 	# ---- Title ----
 	var title_row := UITheme.hbox(16)
-	title_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	main.add_child(title_row)
 	var icon := TextureRect.new()
 	icon.texture = load("res://icon.svg")
@@ -144,6 +148,14 @@ func _build_ui():
 	title_row.add_child(tcol)
 	tcol.add_child(UITheme.label("Duel of the Seven Crowns", 38, UITheme.GOLD_LIGHT, UITheme.display(700)))
 	tcol.add_child(UITheme.label("Choose who plays each side, then pick a clock.", 15, UITheme.TEXT_DIM, UITheme.ui(500)))
+	title_row.add_child(UITheme.spacer())
+	for spec in [["Puzzles", "Tactics puzzles from real games"], ["Records", "Your record against the seven nobles"], ["Settings", "Board, sound and display options"]]:
+		var tb := UITheme.button(spec[0], "secondary", 15, 42)
+		tb.custom_minimum_size.x = 112
+		tb.tooltip_text = spec[1]
+		tb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		tb.pressed.connect(_open_overlay.bind(spec[0]))
+		title_row.add_child(tb)
 
 	# ---- Player cards ----
 	var cards := UITheme.hbox(14)
@@ -216,6 +228,46 @@ func _build_ui():
 	start.pressed.connect(_on_start)
 	brow.add_child(start)
 
+
+func _open_overlay(which: String):
+	if _overlay != null:
+		return
+	match which:
+		"Puzzles":
+			_overlay = preload("res://puzzle_page.gd").new()
+			_overlay.chosen.connect(func(id):
+				_close_overlay()
+				visible = false
+				puzzle_selected.emit(id)
+				queue_free())
+		"Records":
+			_overlay = preload("res://records_page.gd").new()
+			_overlay.play_against.connect(func(level_id):
+				_close_overlay()
+				_apply_choice("white", "human")
+				_saved.black_bot = level_id
+				_apply_choice("black", level_id)
+				scenario_id = "classic"
+				_update_scenario_button())
+		_:
+			_overlay = preload("res://settings_page.gd").new()
+	_overlay.closed.connect(_close_overlay)
+	add_child(_overlay)
+
+func _close_overlay():
+	if _overlay != null:
+		_overlay.queue_free()
+		_overlay = null
+		_refresh_records()
+
+# Puzzles can be opened straight away when returning from a puzzle.
+static var open_puzzles_next := false
+
+func _refresh_records():
+	for color in _cards:
+		for id in _cards[color].get("records", {}):
+			_cards[color].records[id].text = Records.short_text(id)
+			_cards[color].records[id].visible = _cards[color].records[id].text != ""
 
 func _update_scenario_button():
 	_scenario_btn.text = Scenarios.get_info(scenario_id).name + "   ›"
@@ -342,7 +394,11 @@ func _add_player_card(parent: Node, color: String):
 		prow.add_child(b)
 		choices[p.id] = b
 
-	_cards[color] = {"human": mh, "bot": mb, "human_box": human_box, "bot_box": bot_box, "choices": choices}
+	var records := {}
+	for id in choices:
+		if choices[id].has_meta("record_label"):
+			records[id] = choices[id].get_meta("record_label")
+	_cards[color] = {"human": mh, "bot": mb, "human_box": human_box, "bot_box": bot_box, "choices": choices, "records": records}
 	mh.toggled.connect(func(on): if on: _set_mode(color, true))
 	mb.toggled.connect(func(on): if on: _set_mode(color, false))
 
@@ -390,8 +446,19 @@ func _level_row(lv: Dictionary, level: int, accent: Color) -> Button:
 	row.add_child(nm)
 	var desc := UITheme.label(lv.desc, 13, UITheme.TEXT_DIM, UITheme.ui(450))
 	desc.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	desc.clip_text = true
+	desc.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	desc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(desc)
+	# your record against this noble (wins–losses–draws)
+	var rec := UITheme.label(Records.short_text(lv.id), 12, UITheme.TEXT_FAINT, UITheme.ui(650))
+	rec.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	rec.tooltip_text = "Your record: wins–losses–draws"
+	rec.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rec.visible = rec.text != ""
+	row.add_child(rec)
+	b.set_meta("record_label", rec)
 	return b
 
 

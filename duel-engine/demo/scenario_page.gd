@@ -17,15 +17,18 @@ class MiniBoard:
 	var board: Array = []
 	var cell := 20.0
 	var question := false   # Shuffled Court: back ranks change every game
+	var white_bottom := true  # false: rotated 180 degrees (Black's view)
 
 	func _draw():
-		var light := Color("#e8dcc2")
-		var dark := Color("#a27d58")
+		var cols := Settings.board_colors()
+		var light: Color = cols[0]
+		var dark: Color = cols[1]
 		var names := {"K": "king", "N": "knight", "C": "cardinal", "P": "paladin", "M": "marshal", "D": "donkey", "L": "lancer", "W": "warden"}
 		for r in 7:
 			for c in 7:
-				var vr := 6 - r
-				var rect := Rect2(c * cell, vr * cell, cell, cell)
+				var vr := (6 - r) if white_bottom else r
+				var vc := c if white_bottom else 6 - c
+				var rect := Rect2(vc * cell, vr * cell, cell, cell)
 				draw_rect(rect, light if (r + c) % 2 == 0 else dark)
 				if board.is_empty():
 					continue

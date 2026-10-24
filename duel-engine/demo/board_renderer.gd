@@ -118,9 +118,11 @@ func _draw():
 	if _board.is_empty():
 		return
 	_draw_highlights()
-	_draw_legal_moves()
+	if Settings.get_value("show_legal"):
+		_draw_legal_moves()
 	_draw_hover()
-	_draw_coordinates()
+	if Settings.get_value("show_coords"):
+		_draw_coordinates()
 	if _game_over:
 		draw_rect(Rect2(Vector2.ZERO, Vector2(BOARD_PX, BOARD_PX)), Color(0.03, 0.04, 0.08, 0.45))
 
@@ -141,6 +143,9 @@ func _draw_frame():
 
 
 func _draw_squares():
+	var cols := Settings.board_colors()
+	board_light = cols[0]
+	board_dark = cols[1]
 	for r in range(ROWS):
 		for c in range(COLS):
 			var color = board_light if (r + c) % 2 == 0 else board_dark

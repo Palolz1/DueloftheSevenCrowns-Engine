@@ -56,6 +56,8 @@ var position_keys: Array = []
 var snapshots: Array = []
 # Starting position (see scenarios.gd). "classic" = the standard setup.
 var scenario_id := "classic"
+# Puzzle mode: {board, turn} to start from instead of a scenario.
+var custom_start := {}
 var game_over: bool = false
 var current_eval_score: float = 0.0
 # White-relative mate string from the engine ("M3" = White mates in 3,
@@ -320,15 +322,19 @@ func reset_game():
 	_stop_hint_thread()
 	hint_arrow = null
 	hint_gen += 1
-	board = Scenarios.make_board(scenario_id)
-	turn = "white"
+	if custom_start.is_empty():
+		board = Scenarios.make_board(scenario_id)
+		turn = "white"
+	else:
+		board = custom_start.board.duplicate(true)
+		turn = custom_start.turn
 	selected_square = []
 	legal_moves = []
 	last_move = null
 	halfmove_clock = 0
 	move_history.clear()
 	uci_moves.clear()
-	var start_fen := Scenarios.board_to_fen(board)
+	var start_fen := Scenarios.board_to_fen(board, turn)
 	if fairy != null:
 		fairy.set_start_fen(start_fen)
 		fairy.new_game()
@@ -513,7 +519,48 @@ func _snapshot() -> Dictionary:
 		"last_move": last_move.duplicate(true) if last_move != null else null,
 		"turn": turn,
 		"in_check": engine.is_in_check(turn),
+		# what undo needs to restore this position exactly
+		"halfmove": halfmove_clock,
+		"keys": position_keys.duplicate(),
 	}
+
+# Stops a bot that is thinking about the current position and makes the
+# waiting coroutines drop their result (same mechanism as reset_game).
+func abort_bot():
+	game_gen += 1
+	if bot_thread != null and bot_thread.is_started():
+		if fairy != null:
+			fairy.stop_search()
+		bot_thread.wait_to_finish()
+	bot_thread = null
+
+# Takes back the last `n` plies. Returns false if there aren't that many.
+func undo_plies(n: int) -> bool:
+	if n <= 0 or snapshots.size() - 1 < n:
+		return false
+	abort_bot()
+	_stop_hint_thread()
+	hint_gen += 1
+	hint_arrow = null
+	var target := snapshots.size() - 1 - n
+	snapshots.resize(target + 1)
+	var snap: Dictionary = snapshots[target]
+	board = snap.board.duplicate(true)
+	turn = snap.turn
+	last_move = snap.last_move.duplicate(true) if snap.last_move != null else null
+	halfmove_clock = snap.halfmove
+	position_keys = snap.keys.duplicate()
+	move_history.resize(target)
+	uci_moves.resize(target)
+	selected_square = []
+	legal_moves = []
+	game_over = false
+	turn_grace_remaining = TURN_GRACE_PERIOD if clock_enabled else 0.0
+	engine.set_board(board, turn)
+	engine.set_repetition_history(_previous_position_keys())
+	_update_eval()
+	board_changed.emit()
+	return true
 
 # True when the current position (same pieces, same side to move) has now
 # occurred three times.

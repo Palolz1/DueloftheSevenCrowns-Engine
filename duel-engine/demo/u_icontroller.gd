@@ -255,8 +255,19 @@ var _eval_graph: EvalGraph
 var _eval_box: VBoxContainer     # bar + graph, hidden when the eval is turned off
 var _eval_hidden_label: Label
 var _eval_toggle_btn: Button
-var eval_visible := true         # saved in user://settings.cfg
-const SETTINGS_PATH := "user://settings.cfg"
+var _eval_head: HBoxContainer
+var undo_btn: Button
+var settings_btn: Button
+# Puzzle mode panel (replaces the evaluation while solving)
+var _puzzle_box: VBoxContainer
+var _puzzle_title: Label
+var _puzzle_prompt: Label
+var _puzzle_feedback: Label
+var _puzzle_hint_btn: Button
+var _puzzle_solution_btn: Button
+var _puzzle_next_btn: Button
+var _puzzle_mode := false
+var eval_visible := true         # mirrors Settings "show_eval"
 var _moves_grid: GridContainer
 var _moves_scroll: ScrollContainer
 var _game_over_layer: Control = null
@@ -355,8 +366,39 @@ func _create_ui():
 	status_label.visible = false
 	col.add_child(status_label)
 
+	# Puzzle panel (only in puzzle mode)
+	_puzzle_box = UITheme.vbox(8)
+	_puzzle_box.visible = false
+	col.add_child(_puzzle_box)
+	_puzzle_box.add_child(UITheme.heading("Puzzle"))
+	_puzzle_title = UITheme.label("", 22, UITheme.GOLD_LIGHT, UITheme.display(700))
+	_puzzle_box.add_child(_puzzle_title)
+	_puzzle_prompt = UITheme.label("", 14, UITheme.TEXT, UITheme.ui(550))
+	_puzzle_prompt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_puzzle_box.add_child(_puzzle_prompt)
+	_puzzle_feedback = UITheme.label("", 14, UITheme.TEXT_DIM, UITheme.ui(600))
+	_puzzle_feedback.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_puzzle_box.add_child(_puzzle_feedback)
+	var prow := UITheme.hbox(8)
+	_puzzle_box.add_child(prow)
+	_puzzle_hint_btn = UITheme.button("Hint", "secondary", 14, 36)
+	_puzzle_hint_btn.tooltip_text = "Highlight the piece to move"
+	_puzzle_hint_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_puzzle_hint_btn.pressed.connect(func(): get_parent().puzzle_hint())
+	prow.add_child(_puzzle_hint_btn)
+	_puzzle_solution_btn = UITheme.button("Solution", "secondary", 14, 36)
+	_puzzle_solution_btn.tooltip_text = "Play the answer on the board"
+	_puzzle_solution_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_puzzle_solution_btn.pressed.connect(func(): get_parent().puzzle_show_solution())
+	prow.add_child(_puzzle_solution_btn)
+	_puzzle_next_btn = UITheme.button("Next puzzle  ›", "secondary", 14, 36)
+	_puzzle_next_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_puzzle_next_btn.pressed.connect(func(): get_parent().next_puzzle())
+	prow.add_child(_puzzle_next_btn)
+
 	# Evaluation (can be hidden so a game isn't spoiled by the engine)
 	var eval_head := UITheme.hbox(8)
+	_eval_head = eval_head
 	col.add_child(eval_head)
 	var eh := UITheme.heading("Evaluation")
 	eh.size_flags_vertical = Control.SIZE_SHRINK_CENTER
@@ -438,15 +480,21 @@ func _create_ui():
 
 	# Buttons
 	var grid := GridContainer.new()
-	grid.columns = 3
+	grid.columns = 4
 	grid.add_theme_constant_override("h_separation", 8)
 	col.add_child(grid)
-	flip_btn = UITheme.button("Flip board", "secondary", 14, 38)
+	undo_btn = UITheme.button("Undo", "secondary", 14, 38)
+	undo_btn.tooltip_text = "Take back your last move (Ctrl+Z)"
+	undo_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	undo_btn.pressed.connect(func(): get_parent().undo_move())
+	undo_btn.disabled = true
+	grid.add_child(undo_btn)
+	flip_btn = UITheme.button("Flip", "secondary", 14, 38)
 	flip_btn.tooltip_text = "Turn the board around (F)"
 	flip_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	flip_btn.pressed.connect(_on_flip_pressed)
 	grid.add_child(flip_btn)
-	clear_drawings_btn = UITheme.button("Clear arrows", "secondary", 14, 38)
+	clear_drawings_btn = UITheme.button("Clear", "secondary", 14, 38)
 	clear_drawings_btn.tooltip_text = "Remove right-click arrows (C)"
 	clear_drawings_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	clear_drawings_btn.pressed.connect(_on_clear_drawings_pressed)
@@ -456,9 +504,66 @@ func _create_ui():
 	info_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	info_btn.pressed.connect(_on_info_pressed)
 	grid.add_child(info_btn)
+	var bottom_row := UITheme.hbox(8)
+	col.add_child(bottom_row)
+	settings_btn = UITheme.button("Settings", "secondary", 14, 44)
+	settings_btn.custom_minimum_size.x = 110
+	settings_btn.tooltip_text = "Board, sound and display options"
+	settings_btn.pressed.connect(func(): get_parent().open_settings())
+	bottom_row.add_child(settings_btn)
 	new_game_btn = UITheme.button("New game", "primary", 16, 44)
+	new_game_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	new_game_btn.pressed.connect(_on_new_game)
-	col.add_child(new_game_btn)
+	bottom_row.add_child(new_game_btn)
+
+
+# ---- Undo / puzzle mode -----------------------------------------------------
+func set_undo_enabled(on: bool):
+	if undo_btn != null:
+		undo_btn.disabled = not on
+
+# Called after GameState.undo_plies(): drop the eval points of the moves
+# that were taken back and redraw the sidebar for the restored position.
+func on_undo():
+	var game_state = get_parent().get_node("GameState")
+	var n: int = game_state.snapshots.size()
+	if eval_history.size() > n:
+		eval_history.resize(n)
+	var plies: int = n - 1
+	var black_first: bool = game_state.snapshots[0].turn == "black"
+	turn_number = (plies + (1 if black_first else 0)) / 2 + 1
+	turn_counter_label.text = "Turn %d" % turn_number
+	_hide_game_over_card()
+	update_turn(game_state.turn, false)
+
+func set_puzzle_mode(on: bool, title: String = "", prompt: String = ""):
+	_puzzle_mode = on
+	_puzzle_box.visible = on
+	_eval_head.visible = not on
+	_apply_eval_visible()
+	hint_toggle.visible = not on
+	undo_btn.visible = not on
+	clear_drawings_btn.get_parent().columns = 3 if on else 4
+	new_game_btn.text = "All puzzles" if on else "New game"
+	if on:
+		_puzzle_title.text = title
+		_puzzle_prompt.text = prompt
+		set_puzzle_feedback("", UITheme.TEXT_DIM)
+		set_puzzle_buttons(true)
+
+func set_puzzle_feedback(text: String, color: Color):
+	_puzzle_feedback.text = text
+	_puzzle_feedback.add_theme_color_override("font_color", color)
+	_puzzle_feedback.visible = text != ""
+
+# solving: Hint/Solution active; otherwise only Next.
+func set_puzzle_buttons(solving: bool):
+	_puzzle_hint_btn.disabled = not solving
+	_puzzle_solution_btn.disabled = not solving
+	_style_next(not solving)
+
+func _style_next(highlight: bool):
+	UITheme.style_button(_puzzle_next_btn, "primary" if highlight else "secondary")
 
 
 # ---- Evaluation on/off -------------------------------------------------
@@ -470,22 +575,22 @@ func toggle_eval():
 func set_eval_visible(on: bool):
 	eval_visible = on
 	_apply_eval_visible()
-	var cfg := ConfigFile.new()
-	cfg.load(SETTINGS_PATH)   # keep any other settings in the file
-	cfg.set_value("display", "show_eval", on)
-	cfg.save(SETTINGS_PATH)
+	Settings.set_value("show_eval", on)
 
 func _apply_eval_visible():
 	if _eval_box == null:
 		return
-	_eval_box.visible = eval_visible
+	_eval_box.visible = eval_visible and not _puzzle_mode
 	_eval_hidden_label.visible = not eval_visible
 	_eval_toggle_btn.text = "Hide" if eval_visible else "Show"
 
 func _load_settings():
-	var cfg := ConfigFile.new()
-	if cfg.load(SETTINGS_PATH) == OK:
-		eval_visible = bool(cfg.get_value("display", "show_eval", true))
+	eval_visible = bool(Settings.get_value("show_eval"))
+
+# Re-read everything the settings page can change.
+func refresh_settings():
+	_load_settings()
+	_apply_eval_visible()
 
 
 # Shows the starting-position name in the header ("" for Classic).
@@ -529,6 +634,8 @@ const LEVELS := UITheme.LEVEL_IDS
 func _bot_label(type: String) -> String:
 	if type == "human":
 		return "Human"
+	if type == "puzzle":
+		return "Defender"
 	var lvl := LEVELS.find(type)
 	if lvl >= 0:
 		return "The " + UITheme.LEVEL_TITLES[lvl]
@@ -537,6 +644,8 @@ func _bot_label(type: String) -> String:
 func _bot_sub(type: String) -> String:
 	if type == "human":
 		return "Human player"
+	if type == "puzzle":
+		return "Puzzle  ·  plays the best defence"
 	var lvl := LEVELS.find(type)
 	if lvl >= 0:
 		return "Computer  ·  Level %d of 7  ·  %s" % [lvl + 1, UITheme.LEVEL_DIFFICULTY[lvl]]
@@ -678,14 +787,18 @@ func _refresh_moves(history: Array, selected: int = -1):
 	if selected == -1:
 		selected = history.size() - 1
 	var selected_ctl: Control = null
+	# Positions with Black to move first (puzzles) leave White's first cell
+	# as "…" so the columns stay White | Black.
+	var gs = get_parent().get_node("GameState")
+	var offset := 1 if not gs.snapshots.is_empty() and gs.snapshots[0].turn == "black" else 0
 	var i := 0
-	while i < history.size():
+	while i < history.size() + offset:
 		var num := UITheme.label("%d." % (i / 2 + 1), 13, UITheme.TEXT_FAINT, UITheme.ui(600))
 		num.custom_minimum_size = Vector2(30, 0)
 		_moves_grid.add_child(num)
 		for k in 2:
-			var idx := i + k
-			var txt: String = history[idx] if idx < history.size() else ""
+			var idx := i + k - offset
+			var txt: String = history[idx] if idx >= 0 and idx < history.size() else ("…" if idx < 0 else "")
 			var is_sel := idx == selected
 			var b := Button.new()
 			b.text = txt
@@ -704,7 +817,7 @@ func _refresh_moves(history: Array, selected: int = -1):
 			b.add_theme_stylebox_override("pressed", sel_box)
 			b.add_theme_stylebox_override("hover", UITheme.box(UITheme.SURFACE_HI, 6, Color(0, 0, 0, 0), 0, 4) if game_over else sel_box)
 			b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-			if txt == "" or not game_over:
+			if txt == "" or idx < 0 or not game_over:
 				b.disabled = true
 			else:
 				b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -833,9 +946,10 @@ func show_game_over(reason: String, winner: String):
 	for c in ["white", "black"]:
 		_bars[c].set_active(false)
 		_bars[c].set_thinking(false)
-	_show_game_over_card(title, sub, winner)
+	var note: String = get_parent().record_game_result(winner)
+	_show_game_over_card(title, sub, winner, note)
 
-func _show_game_over_card(title: String, sub: String, winner: String):
+func _show_game_over_card(title: String, sub: String, winner: String, note: String = ""):
 	_hide_game_over_card()
 	var layer_ctl := Control.new()
 	layer_ctl.position = BOARD_ORIGIN
@@ -867,6 +981,10 @@ func _show_game_over_card(title: String, sub: String, winner: String):
 		var s := UITheme.label(sub, 16, UITheme.TEXT_DIM, UITheme.ui(500))
 		s.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		v.add_child(s)
+	if note != "":
+		var n := UITheme.label(note, 13, UITheme.GOLD, UITheme.ui(600))
+		n.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		v.add_child(n)
 	var row := UITheme.hbox(10)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	v.add_child(row)
@@ -898,6 +1016,8 @@ func _on_turn_changed(new_turn: String):
 	update_turn(new_turn)
 
 func _on_game_ended(reason: String, winner: String):
+	if get_parent().puzzle_active:
+		return   # StartGameplay shows the puzzle result instead
 	show_game_over(reason, winner)
 
 func _on_thinking():

@@ -23,6 +23,13 @@ func animate_move(from_row: int, from_col: int, to_row: int, to_col: int, piece_
 	Call this BEFORE mutating the board array.
 	"""
 	_kill_active()
+	var f := Settings.anim_factor()
+	if f <= 0.0:
+		# Animations off: finish on the next idle step, after the caller
+		# has started awaiting the signal.
+		_is_animating = true
+		call_deferred("_finish_move")
+		return
 
 	_is_animating = true
 	_active_piece = _build_piece_visual(piece_code)
@@ -35,7 +42,7 @@ func animate_move(from_row: int, from_col: int, to_row: int, to_col: int, piece_
 	_tween = create_tween()
 	_tween.set_trans(Tween.TRANS_QUAD)
 	_tween.set_ease(Tween.EASE_IN_OUT)
-	_tween.tween_property(_active_piece, "position", target_pos, 0.18)
+	_tween.tween_property(_active_piece, "position", target_pos, 0.18 * f)
 	_tween.tween_callback(_finish_move)
 
 
@@ -45,6 +52,11 @@ func animate_capture(from_row: int, from_col: int, to_row: int, to_col: int,
 	Slides the attacker to the target, flashes the captured square, then finishes.
 	"""
 	_kill_active()
+	var f := Settings.anim_factor()
+	if f <= 0.0:
+		_is_animating = true
+		call_deferred("_finish_capture")
+		return
 
 	_is_animating = true
 	_active_piece = _build_piece_visual(piece_code)
@@ -57,12 +69,12 @@ func animate_capture(from_row: int, from_col: int, to_row: int, to_col: int,
 	_tween = create_tween()
 	_tween.set_trans(Tween.TRANS_QUAD)
 	_tween.set_ease(Tween.EASE_IN_OUT)
-	_tween.tween_property(_active_piece, "position", target_pos, 0.20)
+	_tween.tween_property(_active_piece, "position", target_pos, 0.20 * f)
 
 	# Brief impact pause on arrival
-	_tween.tween_interval(0.06)
+	_tween.tween_interval(0.06 * f)
 	_tween.tween_callback(_flash_square.bind(to_row, to_col))
-	_tween.tween_interval(0.10)
+	_tween.tween_interval(0.10 * f)
 	_tween.tween_callback(_finish_capture)
 
 
