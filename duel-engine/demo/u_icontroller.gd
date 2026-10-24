@@ -839,6 +839,9 @@ func _on_thinking_done():
 func _on_hint_toggled(enabled: bool):
 	var root = get_parent()
 	var game_state = root.get_node("GameState")
+	if game_state.game_over:
+		root.update_review_hint()  # analyse the position being reviewed
+		return
 	if enabled:
 		var current_player = root.white_player if game_state.turn == "white" else root.black_player
 		if current_player == "human" and not game_state.game_over:

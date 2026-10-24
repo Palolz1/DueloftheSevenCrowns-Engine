@@ -78,7 +78,17 @@ func set_review_ply(ply: int):
 		return
 	review_ply = clampi(ply, 0, game_state.snapshots.size() - 1)
 	_hovered_square = []
+	update_review_hint()
 	_on_board_changed()
+
+# Runs (or stops) "Show best move" for the position being reviewed.
+func update_review_hint():
+	if review_ply < 0 or not game_state.game_over:
+		return
+	if ui_controller.hint_toggle.button_pressed:
+		game_state.start_review_hint(review_ply)
+	else:
+		game_state.stop_review_hint()
 
 func toggle_flip():
 	flipped = not flipped
@@ -141,8 +151,9 @@ func _on_board_changed():
 		return
 	if review_ply >= 0 and game_state.game_over and review_ply < game_state.snapshots.size():
 		var snap: Dictionary = game_state.snapshots[review_ply]
+		var arrow = game_state.review_hint_arrow if ui_controller.hint_toggle.button_pressed else null
 		board_renderer.render(snap.board, [], [], snap.last_move, snap.in_check, snap.turn,
-			null, [], "", "", [], [])
+			arrow, [], "", "", [], [])
 		ui_controller.show_review(review_ply, snap, game_state.snapshots.size())
 		return
 	var hover = _get_hover_moves()
@@ -309,6 +320,7 @@ func _do_bot_move(player_type: String, time_limit: float):
 
 func new_game():
 	review_ply = -1
+	game_state.review_hint_arrow = null
 	_bot_scheduled = false
 	_is_animating = false
 	_game_over_reason = ""

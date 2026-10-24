@@ -16,6 +16,12 @@ var uci_moves: Array = []
 # the UI responsive when a move is made; the engine's hash table carries the
 # work over, so the depth still climbs from slice to slice.
 const HINT_SLICE_MS := 300
+# Shorter slices while reviewing, so stepping through moves quickly with the
+# arrow keys never waits long for the previous analysis to stop.
+const REVIEW_HINT_SLICE_MS := 150
+
+# Best move for the position being reviewed after the game (or null).
+var review_hint_arrow = null
 const HINT_SLICES := 40
 var hint_thread: Thread = null
 var hint_mutex: Mutex = Mutex.new()
@@ -209,22 +215,60 @@ func _restart_hint_search():
 	else:
 		hint_thread.start(_hint_worker.bind(gen, hm))
 
-func _fairy_hint_worker(gen: int, moves: Array, white_to_move: bool):
+# ------------------------------------------------------------------
+# "Show best move" while reviewing a finished game: analyse the position
+# being looked at (snapshot `ply`) instead of the live board.
+# ------------------------------------------------------------------
+func start_review_hint(ply: int):
+	_stop_hint_thread()
+	hint_gen += 1
+	var gen = hint_gen
+	review_hint_arrow = null
+	if ply < 0 or ply >= snapshots.size():
+		return
+	hint_mutex.lock()
+	hint_stop = false
+	hint_mutex.unlock()
+	var snap: Dictionary = snapshots[ply]
+	hint_thread = Thread.new()
+	if fairy_hint != null and fairy_hint.ok:
+		# Replaying the game's moves up to `ply` gives the engine the real
+		# history (repetitions, 40-move count), not just the board.
+		hint_thread.start(_fairy_hint_worker.bind(gen, uci_moves.slice(0, ply), snap.turn == "white", true))
+	else:
+		hint_engine.set_board(snap.board, snap.turn)
+		hint_engine.set_repetition_history([])
+		hint_thread.start(_hint_worker.bind(gen, 0, true))
+
+func stop_review_hint():
+	_stop_hint_thread()
+	hint_gen += 1
+	review_hint_arrow = null
+	board_changed.emit()
+
+func _on_review_hint_result(result: Dictionary, gen: int):
+	if gen != hint_gen or not result.has("from_row"):
+		return
+	review_hint_arrow = [result.from_row, result.from_col, result.to_row, result.to_col]
+	board_changed.emit()
+
+func _fairy_hint_worker(gen: int, moves: Array, white_to_move: bool, review: bool = false):
+	var slice_ms := REVIEW_HINT_SLICE_MS if review else HINT_SLICE_MS
 	for i in HINT_SLICES:
 		hint_mutex.lock()
 		var stop = hint_stop
 		hint_mutex.unlock()
 		if stop or gen != hint_gen:
 			return
-		var result = fairy_hint.go(moves, HINT_SLICE_MS, 0, white_to_move)
+		var result = fairy_hint.go(moves, slice_ms, 0, white_to_move)
 		hint_mutex.lock()
 		stop = hint_stop
 		hint_mutex.unlock()
 		if stop or gen != hint_gen or result.is_empty():
 			return
-		call_deferred("_on_hint_result", result, gen)
+		call_deferred("_on_review_hint_result" if review else "_on_hint_result", result, gen)
 
-func _hint_worker(gen: int, hm: int):
+func _hint_worker(gen: int, hm: int, review: bool = false):
 	for d in range(1, 26):
 		hint_mutex.lock()
 		var stop = hint_stop
@@ -241,7 +285,7 @@ func _hint_worker(gen: int, hm: int):
 			return
 
 		if result.has("from_row"):
-			call_deferred("_on_hint_result", result, gen)
+			call_deferred("_on_review_hint_result" if review else "_on_hint_result", result, gen)
 
 func _on_hint_result(result: Dictionary, gen: int):
 	if gen != hint_gen:
