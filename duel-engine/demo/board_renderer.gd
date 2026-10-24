@@ -58,6 +58,40 @@ var _hover_moves: Array = []
 var _hovered: Array = []
 var _game_over := false
 
+# Puzzle hint: a square that pulses gold until the next move.
+var hint_square: Array = []
+var _blink_t := 0.0
+const HINT_GLOW := Color("#ffb020")
+const HINT_EDGE := Color("#ff7a00")
+
+
+func set_hint_square(sq: Array) -> void:
+	hint_square = sq
+	_blink_t = 0.0
+	set_process(not sq.is_empty())
+	queue_redraw()
+
+
+func _process(delta: float) -> void:
+	if hint_square.is_empty():
+		set_process(false)
+		return
+	_blink_t += delta
+	queue_redraw()
+
+
+func _draw_hint_square():
+	if hint_square.is_empty():
+		return
+	# 0..1 pulse, about 1.4 blinks per second; the power keeps it "off" a
+	# little longer so the blink reads clearly even on light squares
+	var a := pow(0.5 + 0.5 * sin(_blink_t * TAU * 1.4), 1.5)
+	var rect := Rect2(cell_pos(hint_square[0], hint_square[1]), Vector2(CELL_SIZE, CELL_SIZE))
+	draw_rect(rect, Color(HINT_GLOW, 0.85 * a))
+	draw_rect(rect.grow(-3), Color(HINT_EDGE, 0.2 + 0.8 * a), false, 6.0)
+	# outer glow that grows with the pulse
+	draw_rect(rect.grow(3 + 5 * a), Color(HINT_EDGE, 0.6 * a), false, 4.0)
+
 
 # ---------------------------------------------------------------------------
 # Coordinates
@@ -118,6 +152,7 @@ func _draw():
 	if _board.is_empty():
 		return
 	_draw_highlights()
+	_draw_hint_square()
 	if Settings.get_value("show_legal"):
 		_draw_legal_moves()
 	_draw_hover()

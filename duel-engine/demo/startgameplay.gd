@@ -511,6 +511,7 @@ func start_puzzle(id: String):
 		player_setup.queue_free()
 		player_setup = null
 	var start := Puzzles.fen_to_start(p.fen)
+	board_renderer.set_hint_square([])
 	puzzle = p
 	puzzle_active = true
 	puzzle_step = 0
@@ -562,6 +563,7 @@ func start_puzzle(id: String):
 	SFXhandler.play("newgame")
 
 func _leave_puzzle_mode():
+	board_renderer.set_hint_square([])
 	if not puzzle_active:
 		return
 	puzzle_active = false
@@ -571,6 +573,7 @@ func _leave_puzzle_mode():
 	ui_controller.set_puzzle_mode(false)
 
 func _puzzle_after_move():
+	board_renderer.set_hint_square([])
 	if puzzle.get("random", false):
 		_random_after_move()
 		return
@@ -648,8 +651,13 @@ func puzzle_hint():
 	else:
 		mv = puzzle.line[puzzle_step]
 	var m := Puzzles.uci_to_move(mv)
-	game_state.select_square(m.from_row, m.from_col)
-	ui_controller.set_puzzle_feedback("Hint: move the highlighted piece.", UITheme.GOLD_LIGHT)
+	# Blink the piece itself (no move dots or capture rings: those would give
+	# away more than the hint says and look like extra highlights).
+	game_state.selected_square = []
+	game_state.legal_moves = []
+	board_renderer.set_hint_square([m.from_row, m.from_col])
+	_on_board_changed()
+	ui_controller.set_puzzle_feedback("Hint: move the blinking piece.", UITheme.GOLD_LIGHT)
 
 func puzzle_show_solution():
 	if not puzzle_active or _puzzle_done or _puzzle_busy:
@@ -657,6 +665,7 @@ func puzzle_show_solution():
 	puzzle_clean = false
 	_puzzle_busy = true
 	var gen: int = game_state.game_gen
+	board_renderer.set_hint_square([])
 	ui_controller.set_puzzle_feedback("Here is the solution.", UITheme.GOLD_LIGHT)
 	game_state.selected_square = []
 	game_state.legal_moves = []
