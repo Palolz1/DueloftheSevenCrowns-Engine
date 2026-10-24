@@ -168,6 +168,18 @@ static func add_random_result(n: int, solved: bool, clean: bool) -> void:
 		_random["streak"] = 0
 	_save()
 
+# "Closing it out" results
+static func add_closeout_result(won: bool) -> void:
+	_ensure_loaded()
+	_random["co_played"] = random_stat("co_played") + 1
+	if won:
+		_random["co_won"] = random_stat("co_won") + 1
+		_random["co_streak"] = random_stat("co_streak") + 1
+		_random["co_best_streak"] = max(random_stat("co_best_streak"), _random["co_streak"])
+	else:
+		_random["co_streak"] = 0
+	_save()
+
 static func _save() -> void:
 	var cfg := ConfigFile.new()
 	for k in _progress:

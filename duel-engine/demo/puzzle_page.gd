@@ -31,6 +31,7 @@ func _ready():
 	scroll.add_child(list)
 
 	list.add_child(_random_card())
+	list.add_child(_closeout_card())
 	list.add_child(UITheme.spacer(false))
 
 	for th in Puzzles.THEMES:
@@ -92,6 +93,42 @@ func _random_card() -> Control:
 
 func _on_random_ready(_p: Dictionary):
 	chosen.emit("random")
+
+
+func _on_closeout_ready(_p: Dictionary):
+	chosen.emit("closeout")
+
+
+# "Closing it out": convert a winning position as Black against the King
+func _closeout_card() -> Control:
+	var card := UITheme.panel(UITheme.card(18))
+	var row := UITheme.hbox(24)
+	card.add_child(row)
+	var info := UITheme.vbox(4)
+	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(info)
+	info.add_child(UITheme.label("Closing it out", 22, UITheme.GOLD_LIGHT, UITheme.display(700)))
+	var d := UITheme.label("You play Black from a random position the engine rates at +9 or better for you. The King defends with everything it has. Just win.", 14, UITheme.TEXT_DIM, UITheme.ui(500))
+	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info.add_child(d)
+	var played := Puzzles.random_stat("co_played")
+	info.add_child(UITheme.label("%d of %d converted  ·  current streak %d  ·  best streak %d" % [
+		Puzzles.random_stat("co_won"), played, Puzzles.random_stat("co_streak"), Puzzles.random_stat("co_best_streak")],
+		13, UITheme.TEXT_FAINT, UITheme.ui(600)))
+	var pg := PuzzleGen.get_instance(get_tree())
+	if not pg.ok:
+		row.add_child(UITheme.label("Needs Fairy-Stockfish", 14, UITheme.RUBY, UITheme.ui(600)))
+		return card
+	var b := UITheme.button("Play a winning position", "primary", 14, 44)
+	b.custom_minimum_size.x = 220
+	b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	b.pressed.connect(func():
+		b.disabled = true
+		b.text = "Finding…"
+		pg.generated.connect(_on_closeout_ready, CONNECT_ONE_SHOT)
+		pg.request(PuzzleGen.CLOSEOUT))
+	row.add_child(b)
+	return card
 
 
 func _tile(p: Dictionary, n: int) -> Button:

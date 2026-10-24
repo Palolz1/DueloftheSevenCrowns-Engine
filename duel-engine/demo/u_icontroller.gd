@@ -347,6 +347,8 @@ func _create_ui():
 	header.add_child(icon)
 	var titles := UITheme.vbox(0)
 	titles.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	titles.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	titles.custom_minimum_size.x = 1   # long status text clips instead of widening the sidebar
 	header.add_child(titles)
 	titles.add_child(UITheme.label("Duel of the Seven Crowns", 19, UITheme.GOLD_LIGHT, UITheme.display(700)))
 	var turn_row := UITheme.hbox(8)
@@ -355,6 +357,9 @@ func _create_ui():
 	turn_row.add_child(turn_counter_label)
 	turn_row.add_child(UITheme.label("•", 13, UITheme.TEXT_FAINT))
 	turn_label = UITheme.label("White to move", 13, UITheme.TEXT, UITheme.ui(600))
+	turn_label.clip_text = true
+	turn_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	turn_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	turn_row.add_child(turn_label)
 	_mode_label = UITheme.label("", 13, UITheme.GOLD, UITheme.ui(650))
 	_mode_label.visible = false
@@ -551,6 +556,18 @@ func set_puzzle_mode(on: bool, title: String = "", prompt: String = ""):
 		set_puzzle_feedback("", UITheme.TEXT_DIM)
 		set_puzzle_buttons(true)
 
+# "Closing it out": a normal game against the computer from a winning
+# position, so only the controls that would make it trivial are hidden.
+var idle_status := ""   # status line shown when nothing else is (closeout goal)
+
+func set_closeout_mode(on: bool):
+	if not on:
+		idle_status = ""
+	hint_toggle.visible = not on
+	undo_btn.visible = not on
+	clear_drawings_btn.get_parent().columns = 3 if on else 4
+	new_game_btn.text = "All puzzles" if on else "New game"
+
 func set_puzzle_feedback(text: String, color: Color):
 	_puzzle_feedback.text = text
 	_puzzle_feedback.add_theme_color_override("font_color", color)
@@ -734,7 +751,7 @@ func _refresh_dynamic():
 	if game_state.engine != null and not game_state.game_over and game_state.engine.is_in_check(game_state.turn):
 		_set_status("%s is in check" % game_state.turn.capitalize(), UITheme.RUBY)
 	elif not game_state.game_over:
-		_set_status("", UITheme.TEXT)
+		_set_status(idle_status, UITheme.GOLD_LIGHT)
 
 func _set_status(text: String, color: Color):
 	status_label.text = text
@@ -994,10 +1011,19 @@ func _show_game_over_card(title: String, sub: String, winner: String, note: Stri
 		_hide_game_over_card()
 		get_parent().set_review_ply(get_parent().get_node("GameState").snapshots.size() - 1))
 	row.add_child(view)
-	var again := UITheme.button("New game", "primary", 15, 40)
-	again.custom_minimum_size.x = 130
-	again.pressed.connect(_on_new_game)
-	row.add_child(again)
+	if get_parent().closeout_active:
+		var more := UITheme.button("Another position", "primary", 15, 40)
+		more.custom_minimum_size.x = 160
+		more.pressed.connect(func():
+			more.disabled = true
+			more.text = "Finding…"
+			get_parent().next_closeout())
+		row.add_child(more)
+	else:
+		var again := UITheme.button("New game", "primary", 15, 40)
+		again.custom_minimum_size.x = 130
+		again.pressed.connect(_on_new_game)
+		row.add_child(again)
 
 func _hide_game_over_card():
 	if _game_over_layer != null:

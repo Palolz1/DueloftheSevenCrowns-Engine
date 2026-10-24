@@ -56,7 +56,11 @@ func _exit_tree():
 
 
 # ---- Generation ------------------------------------------------------------
-# target: 2, 3 or 4 = mate in that many moves; 0 = any of them.
+# target: 2, 3 or 4 = mate in that many moves; 0 = any of them;
+# CLOSEOUT = a position where Black (to move) is winning by at least
+# CLOSEOUT_MIN centipawns, for "Closing it out".
+const CLOSEOUT := 100
+const CLOSEOUT_MIN := 900
 # Emits `generated` (deferred) when a puzzle is ready.
 func request(target: int):
 	if not ok:
@@ -125,6 +129,18 @@ func _generate(target: int, seed: int):
 			if res.is_empty():
 				break   # game over
 			var m0: int = res[0].mate
+			if target == CLOSEOUT:
+				if ply >= 12 and turn == "black" and _piece_count(board) >= 10 and _very_winning(res[0]):
+					# confirm with a deeper search (and skip quick mates: those are puzzles)
+					var deep := engine.analyse_fen(start_fen, moves, 1, 12)
+					if not deep.is_empty() and _very_winning(deep[0]):
+						_on_generated.call_deferred({
+							"id": "closeout", "closeout": true, "target": CLOSEOUT,
+							"cp": int(deep[0].cp), "mate": int(deep[0].mate),
+							"fen": Scenarios.board_to_fen(board, "black").split(" ")[0] + " b",
+							"setup": setup,
+						})
+						return
 			# A quick depth-5 scan only sees mates up to about 3 moves, so for
 			# mate in 4 any big advantage is worth a deeper look.
 			var candidate := m0 >= 2 and m0 <= 4 and (target == 0 or m0 == target)
@@ -151,6 +167,13 @@ func _generate(target: int, seed: int):
 			moves.append(pick)
 			apply_uci(board, pick)
 			turn = "black" if turn == "white" else "white"
+
+
+# At least +9 for the side to move, or a mate too long to be a puzzle.
+static func _very_winning(line: Dictionary) -> bool:
+	if line.mate != 0:
+		return line.mate >= 5
+	return line.cp >= CLOSEOUT_MIN
 
 
 static func _piece_count(board: Array) -> int:

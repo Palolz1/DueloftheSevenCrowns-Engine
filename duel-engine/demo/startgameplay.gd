@@ -42,6 +42,11 @@ var puzzle_clean := true      # no mistakes and no hint so far
 var _puzzle_busy := false     # scripted moves / take-back in progress
 var _puzzle_done := false
 
+# "Closing it out": you (Black) convert a winning position against the King
+var closeout_active := false
+var _closeout_counted_gen := -1
+const CLOSEOUT_BOT := "expert"
+
 # Records: each finished game is counted once (keyed by GameState.game_gen).
 var _recorded_gen := -1
 var _record_note := ""
@@ -132,6 +137,7 @@ func _show_player_setup():
 
 func _on_players_selected(w_type: String, b_type: String, g_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float, scenario_id: String = "classic"):
 	_leave_puzzle_mode()
+	_leave_closeout()
 	white_player = w_type
 	black_player = b_type
 	game_type = g_type
@@ -370,6 +376,9 @@ func _animate_and_play(fr: int, fc: int, tr: int, tc: int) -> bool:
 	return true
 
 func new_game():
+	if closeout_active:
+		preload("res://PlayerSetup.gd").open_puzzles_next = true
+	_leave_closeout()
 	if puzzle_active:
 		preload("res://PlayerSetup.gd").open_puzzles_next = true   # back to the puzzle list
 	_leave_puzzle_mode()
@@ -409,7 +418,7 @@ func _render_with_skip(skip_squares: Array):
 # Plies to take back so it is a person's turn again, or 0 if undo isn't
 # allowed right now (timed games, bot vs bot, puzzles, finished games).
 func _undo_plies_needed() -> int:
-	if puzzle_active or game_state.game_over or game_type != "untimed":
+	if puzzle_active or closeout_active or game_state.game_over or game_type != "untimed":
 		return 0
 	var plies: int = game_state.snapshots.size() - 1
 	if plies <= 0:
@@ -454,6 +463,15 @@ func undo_move():
 func record_game_result(winner: String) -> String:
 	if puzzle_active:
 		return ""
+	if closeout_active:
+		if _closeout_counted_gen != game_state.game_gen:
+			_closeout_counted_gen = game_state.game_gen
+			Puzzles.add_closeout_result(winner == "Black")
+		var won := Puzzles.random_stat("co_won")
+		var played := Puzzles.random_stat("co_played")
+		if winner == "Black":
+			return "Closed out!  %d of %d positions converted." % [won, played]
+		return "It got away.  %d of %d positions converted." % [won, played]
 	if _recorded_gen == game_state.game_gen:
 		return _record_note
 	_recorded_gen = game_state.game_gen
@@ -505,6 +523,9 @@ func _on_settings_changed():
 # Puzzles
 # ---------------------------------------------------------------------------
 func start_puzzle(id: String):
+	if id == "closeout":
+		start_closeout()
+		return
 	var p: Dictionary = PuzzleGen.get_instance(get_tree()).current if id == "random" else Puzzles.get_puzzle(id)
 	if p.is_empty():
 		return
@@ -789,3 +810,66 @@ func _next_random(target: int):
 	await pg.generated
 	if puzzle_active:   # still in puzzle mode (not back at the menu)
 		start_puzzle("random")
+
+
+# ---------------------------------------------------------------------------
+# Closing it out
+# ---------------------------------------------------------------------------
+func start_closeout():
+	var p: Dictionary = PuzzleGen.get_instance(get_tree()).current
+	if p.is_empty() or not p.get("closeout", false):
+		return
+	if player_setup != null and is_instance_valid(player_setup):
+		player_setup.queue_free()
+		player_setup = null
+	_leave_puzzle_mode()
+	closeout_active = true
+	review_ply = -1
+	game_state.review_hint_arrow = null
+	_bot_scheduled = false
+	_is_animating = false
+	_game_over_reason = ""
+	_winner = ""
+	_hovered_square = []
+	white_player = CLOSEOUT_BOT
+	black_player = "human"
+	game_type = "untimed"
+	game_state.custom_start = Puzzles.fen_to_start(p.fen)
+	game_state.scenario_id = "classic"
+	game_state.reset_game()
+	game_state.setup_clock("untimed", 0.0, 0.0)
+	ui_controller.reset_for_new_game()
+	ui_controller.set_mode_name("Closing it out")
+	ui_controller.set_player_labels(white_player, black_player)
+	ui_controller.set_clocks_visible(false)
+	ui_controller.hint_toggle.button_pressed = false
+	ui_controller.set_closeout_mode(true)
+	flipped = false   # Black (you) at the bottom
+	_apply_orientation()
+	board_renderer.visible = true
+	ui_controller.visible = true
+	input_handler.set_process_input(true)
+	_on_board_changed()
+	ui_controller.update_turn(game_state.turn, false)
+	var edge := "a forced mate" if int(p.mate) > 0 else "+%.1f" % (float(p.cp) / 100.0)
+	ui_controller.idle_status = "You're winning (%s). Finish the job: beat the King from here." % edge
+	ui_controller._refresh_dynamic()
+	SFXhandler.play("newgame")
+	_start_turn()
+	PuzzleGen.get_instance(get_tree()).prefetch(PuzzleGen.CLOSEOUT)
+
+func next_closeout():
+	var pg := PuzzleGen.get_instance(get_tree())
+	if not pg.ok:
+		return
+	pg.request(PuzzleGen.CLOSEOUT)
+	await pg.generated
+	if closeout_active:
+		start_closeout()
+
+func _leave_closeout():
+	if not closeout_active:
+		return
+	closeout_active = false
+	game_state.custom_start = {}
+	ui_controller.set_closeout_mode(false)
