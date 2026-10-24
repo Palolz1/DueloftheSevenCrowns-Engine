@@ -73,6 +73,7 @@ class EvalBar:
 class EvalGraph:
 	extends Control
 	var points: Array = []   # pawns, White-relative, one per position
+	var marker := -1         # position being reviewed (-1 = none)
 	var cap := 20.0
 	var min_bound := 2.0
 
@@ -117,7 +118,11 @@ class EvalGraph:
 			else:
 				_shade(PackedVector2Array([a, b, Vector2(b.x, cy), Vector2(a.x, cy)]), (a.y + b.y) / 2.0 < cy)
 		draw_polyline(pts, UITheme.GOLD, 2.0, true)
-		draw_circle(pts[n - 1], 4.0, UITheme.GOLD_LIGHT)
+		if marker >= 0 and marker < n:
+			draw_line(Vector2(pts[marker].x, m), Vector2(pts[marker].x, m + h), Color(UITheme.GOLD_LIGHT, 0.45), 1.5)
+			draw_circle(pts[marker], 5.0, UITheme.GOLD_LIGHT)
+		else:
+			draw_circle(pts[n - 1], 4.0, UITheme.GOLD_LIGHT)
 
 	# Fills one shaded piece, skipping slivers with (almost) no area -- Godot
 	# can't triangulate those and logs "Invalid polygon data".
@@ -250,6 +255,10 @@ var _eval_graph: EvalGraph
 var _moves_grid: GridContainer
 var _moves_scroll: ScrollContainer
 var _game_over_layer: Control = null
+var _review_bar: HBoxContainer
+var _review_label: Label
+var _review_btns := {}
+var _review_ply := -1   # -1 = showing the live / final position
 
 var turn_number: int = 1
 var eval_history = []
@@ -370,6 +379,23 @@ func _create_ui():
 	_moves_grid.add_theme_constant_override("v_separation", 4)
 	_moves_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_moves_scroll.add_child(_moves_grid)
+
+	# Review controls (only after the game is over)
+	_review_bar = UITheme.hbox(6)
+	_review_bar.visible = false
+	col.add_child(_review_bar)
+	for spec in [["first", "«", "First position (Home)"], ["prev", "‹", "Previous move (Left arrow)"],
+			["next", "›", "Next move (Right arrow)"], ["last", "»", "Final position (End)"]]:
+		var b := UITheme.button(spec[1], "secondary", 20, 36)
+		b.custom_minimum_size.x = 48
+		b.tooltip_text = spec[2]
+		b.pressed.connect(_on_review_button.bind(spec[0]))
+		_review_bar.add_child(b)
+		_review_btns[spec[0]] = b
+	_review_bar.add_child(UITheme.spacer())
+	_review_label = UITheme.label("", 14, UITheme.TEXT_DIM, UITheme.ui(600))
+	_review_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_review_bar.add_child(_review_label)
 
 	# Hint toggle
 	hint_toggle = CheckButton.new()
@@ -516,14 +542,18 @@ func _format_clock(seconds: float) -> String:
 # ---------------------------------------------------------------------------
 # Turn / eval / moves
 # ---------------------------------------------------------------------------
-func update_turn(turn: String):
+# new_position: true when a move was just played (adds a point to the eval
+# history); false when only refreshing, e.g. at the start of a game -- the
+# start position's point is already there, and a second one would shift
+# every later eval by one move.
+func update_turn(turn: String, new_position: bool = true):
 	turn_label.text = turn.capitalize() + " to move"
 	for c in ["white", "black"]:
 		_bars[c].set_active(c == turn)
 	var game_state = get_parent().get_node("GameState")
 	if game_state.clock_enabled:
 		update_clocks(game_state.white_time_remaining, game_state.black_time_remaining)
-	update_eval(game_state.current_eval_score, true, game_state.current_eval_mate)
+	update_eval(game_state.current_eval_score, new_position, game_state.current_eval_mate)
 	_refresh_dynamic()
 
 func _refresh_dynamic():
@@ -565,9 +595,10 @@ func update_eval(eval_score, is_new_move: bool = false, mate: String = ""):
 	eval_label.add_theme_color_override("font_color", UITheme.GOLD_LIGHT if mate != "" else UITheme.TEXT)
 
 	if is_new_move or eval_history.is_empty():
-		eval_history.append([eval_history.size(), numeric_score])
+		eval_history.append([eval_history.size(), numeric_score, text])
 	else:
 		eval_history[eval_history.size() - 1][1] = numeric_score
+		eval_history[eval_history.size() - 1][2] = text
 	last_logged_eval = numeric_score
 	last_logged_label = text
 
@@ -579,23 +610,99 @@ func update_eval(eval_score, is_new_move: bool = false, mate: String = ""):
 	_eval_graph.points = pts
 	_eval_graph.queue_redraw()
 
-func _refresh_moves(history: Array):
+# selected: index of the move to highlight (-1 = the latest move, -2 = none,
+# i.e. the start position is shown). After the
+# game is over every move is a button that jumps the board to that position.
+func _refresh_moves(history: Array, selected: int = -1):
 	for ch in _moves_grid.get_children():
 		ch.queue_free()
+	var game_over: bool = get_parent().get_node("GameState").game_over
+	if selected == -1:
+		selected = history.size() - 1
+	var selected_ctl: Control = null
 	var i := 0
 	while i < history.size():
 		var num := UITheme.label("%d." % (i / 2 + 1), 13, UITheme.TEXT_FAINT, UITheme.ui(600))
 		num.custom_minimum_size = Vector2(30, 0)
 		_moves_grid.add_child(num)
 		for k in 2:
-			var txt: String = history[i + k] if i + k < history.size() else ""
-			var latest := i + k == history.size() - 1
-			var l := UITheme.label(txt, 14, UITheme.GOLD_LIGHT if latest else UITheme.TEXT, UITheme.ui(600 if latest else 500))
-			l.custom_minimum_size = Vector2(130, 0)
-			_moves_grid.add_child(l)
+			var idx := i + k
+			var txt: String = history[idx] if idx < history.size() else ""
+			var is_sel := idx == selected
+			var b := Button.new()
+			b.text = txt
+			b.flat = true
+			b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			b.focus_mode = Control.FOCUS_NONE
+			b.custom_minimum_size = Vector2(130, 24)
+			b.add_theme_font_size_override("font_size", 14)
+			b.add_theme_font_override("font", UITheme.ui(650 if is_sel else 500))
+			var fg := UITheme.GOLD_LIGHT if is_sel else UITheme.TEXT
+			for st in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_disabled_color"]:
+				b.add_theme_color_override(st, fg)
+			var sel_box := UITheme.box(Color(UITheme.GOLD, 0.16), 6, Color(0, 0, 0, 0), 0, 4) if is_sel else UITheme.box(Color(0, 0, 0, 0), 6, Color(0, 0, 0, 0), 0, 4)
+			b.add_theme_stylebox_override("normal", sel_box)
+			b.add_theme_stylebox_override("disabled", sel_box)
+			b.add_theme_stylebox_override("pressed", sel_box)
+			b.add_theme_stylebox_override("hover", UITheme.box(UITheme.SURFACE_HI, 6, Color(0, 0, 0, 0), 0, 4) if game_over else sel_box)
+			b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+			if txt == "" or not game_over:
+				b.disabled = true
+			else:
+				b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+				b.pressed.connect(func(): get_parent().set_review_ply(idx + 1))
+			_moves_grid.add_child(b)
+			if is_sel:
+				selected_ctl = b
 		i += 2
 	await get_tree().process_frame
-	_moves_scroll.scroll_vertical = int(_moves_scroll.get_v_scroll_bar().max_value)
+	if _review_ply < 0 or selected_ctl == null:
+		_moves_scroll.scroll_vertical = int(_moves_scroll.get_v_scroll_bar().max_value)
+	else:
+		_moves_scroll.ensure_control_visible(selected_ctl)
+
+# ---------------------------------------------------------------------------
+# Reviewing a finished game
+# ---------------------------------------------------------------------------
+# Shows position `ply` (0 = start) of the finished game in the sidebar.
+# StartGameplay draws the board; ply == total-1 is the final position.
+func show_review(ply: int, snapshot: Dictionary, total: int):
+	_review_ply = ply
+	_review_bar.visible = true
+	var last := total - 1
+	_review_btns.first.disabled = ply <= 0
+	_review_btns.prev.disabled = ply <= 0
+	_review_btns.next.disabled = ply >= last
+	_review_btns.last.disabled = ply >= last
+	if ply == 0:
+		_review_label.text = "Start position"
+	else:
+		_review_label.text = "Move %d of %d" % [ply, last]
+	turn_label.text = ("Reviewing  ·  " if ply < last else "Final position  ·  ") + snapshot.turn.capitalize() + " to move"
+	# eval as it was at that point in the game
+	if ply < eval_history.size():
+		var e: Array = eval_history[ply]
+		eval_label.text = e[2] if e.size() > 2 else "%+.2f" % float(e[1])
+		_eval_bar.value = float(e[1])
+		_eval_bar.queue_redraw()
+	_eval_graph.marker = ply
+	_eval_graph.queue_redraw()
+	var game_state = get_parent().get_node("GameState")
+	_refresh_moves(game_state.move_history, ply - 1 if ply > 0 else -2)
+	_refresh_captured(snapshot.board)
+
+func _on_review_button(which: String):
+	var root = get_parent()
+	var total: int = root.get_node("GameState").snapshots.size()
+	var cur: int = _review_ply if _review_ply >= 0 else total - 1
+	match which:
+		"first": root.set_review_ply(0)
+		"prev": root.set_review_ply(cur - 1)
+		"next": root.set_review_ply(cur + 1)
+		"last": root.set_review_ply(total - 1)
+
+func is_result_card_visible() -> bool:
+	return _game_over_layer != null
 
 # Pieces each side has captured (shown on the capturer's bar).
 func _refresh_captured(board: Array):
@@ -691,9 +798,11 @@ func _show_game_over_card(title: String, sub: String, winner: String):
 	var row := UITheme.hbox(10)
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	v.add_child(row)
-	var view := UITheme.button("View board", "ghost", 14, 40)
+	var view := UITheme.button("Review game", "ghost", 14, 40)
 	view.custom_minimum_size.x = 130
-	view.pressed.connect(_hide_game_over_card)
+	view.pressed.connect(func():
+		_hide_game_over_card()
+		get_parent().set_review_ply(get_parent().get_node("GameState").snapshots.size() - 1))
 	row.add_child(view)
 	var again := UITheme.button("New game", "primary", 15, 40)
 	again.custom_minimum_size.x = 130
@@ -759,6 +868,9 @@ func reset_for_new_game():
 	last_logged_eval = 999999.0
 	last_logged_label = ""
 	_hide_game_over_card()
+	_review_ply = -1
+	_review_bar.visible = false
+	_eval_graph.marker = -1
 	if board_drawer != null:
 		board_drawer.clear_arrows()
 	_refresh_dynamic()

@@ -29,6 +29,9 @@ var _game_over_reason: String = ""
 var _winner: String = ""
 var _hovered_square: Array = []
 var _is_animating: bool = false
+# Position of the finished game being reviewed (index into
+# GameState.snapshots), or -1 while playing.
+var review_ply := -1
 
 func _ready():
 	get_tree().root.theme = UITheme.make_theme()
@@ -60,6 +63,22 @@ func _input(event):
 				info.toggle()
 		elif event.keycode == KEY_F and board_renderer.visible:
 			toggle_flip()
+		elif game_state.game_over and board_renderer.visible and not game_state.snapshots.is_empty():
+			var last: int = game_state.snapshots.size() - 1
+			var cur: int = review_ply if review_ply >= 0 else last
+			match event.keycode:
+				KEY_LEFT: set_review_ply(cur - 1)
+				KEY_RIGHT: set_review_ply(cur + 1)
+				KEY_HOME: set_review_ply(0)
+				KEY_END: set_review_ply(last)
+
+# Jump the review to position `ply` (0 = start). Only after the game is over.
+func set_review_ply(ply: int):
+	if not game_state.game_over or game_state.snapshots.is_empty():
+		return
+	review_ply = clampi(ply, 0, game_state.snapshots.size() - 1)
+	_hovered_square = []
+	_on_board_changed()
 
 func toggle_flip():
 	flipped = not flipped
@@ -113,12 +132,18 @@ func _on_players_selected(w_type: String, b_type: String, g_type: String, standa
 	_winner = ""
 	_hovered_square = []
 	_on_board_changed()
-	ui_controller.update_turn(game_state.turn)
+	ui_controller.update_turn(game_state.turn, false)
 	_start_turn()
 	SFXhandler.play("newgame")
 
 func _on_board_changed():
 	if _is_animating:
+		return
+	if review_ply >= 0 and game_state.game_over and review_ply < game_state.snapshots.size():
+		var snap: Dictionary = game_state.snapshots[review_ply]
+		board_renderer.render(snap.board, [], [], snap.last_move, snap.in_check, snap.turn,
+			null, [], "", "", [], [])
+		ui_controller.show_review(review_ply, snap, game_state.snapshots.size())
 		return
 	var hover = _get_hover_moves()
 	board_renderer.render(
@@ -197,6 +222,9 @@ func _on_game_ended(reason: String, winner: String):
 	_game_over_reason = reason
 	_winner = winner
 	game_state.stop_hint_search()
+	# Start the review at the final position (deferred so the last eval point
+	# has been recorded first).
+	call_deferred("set_review_ply", game_state.snapshots.size() - 1)
 	_on_board_changed()  # (UIcontroller shows the result card itself)
 
 func _start_turn():
@@ -280,6 +308,7 @@ func _do_bot_move(player_type: String, time_limit: float):
 	game_state.execute_move(result.from_row, result.from_col, result.to_row, result.to_col)
 
 func new_game():
+	review_ply = -1
 	_bot_scheduled = false
 	_is_animating = false
 	_game_over_reason = ""

@@ -44,6 +44,9 @@ var move_history: Array = []
 # Used for threefold repetition and handed to the engines so their searches
 # know which positions would repeat.
 var position_keys: Array = []
+# One snapshot per position of the game (index = ply, 0 = start), used to
+# review a finished game move by move: {board, last_move, turn, in_check}.
+var snapshots: Array = []
 var game_over: bool = false
 var current_eval_score: float = 0.0
 # White-relative mate string from the engine ("M3" = White mates in 3,
@@ -285,6 +288,7 @@ func reset_game():
 	clock_enabled = false
 	engine.set_board(board, turn)
 	position_keys = [engine.get_position_key()]
+	snapshots = [_snapshot()]
 	engine.set_repetition_history([])
 	board_changed.emit()
 
@@ -389,6 +393,7 @@ func execute_move(from_r: int, from_c: int, to_r: int, to_c: int):
 		position_keys.clear()
 	position_keys.append(engine.get_position_key())
 	engine.set_repetition_history(_previous_position_keys())
+	snapshots.append(_snapshot())
 	_check_game_end()
 	if not game_over and engine.is_in_check(turn):
 		SFXhandler.play("check")
@@ -445,6 +450,14 @@ func report_search_eval(result: Dictionary, side: String, ply: int):
 		return  # stale (position has changed since the search started)
 	_set_eval_from_search(result, side)
 	board_changed.emit()
+
+func _snapshot() -> Dictionary:
+	return {
+		"board": board.duplicate(true),
+		"last_move": last_move.duplicate(true) if last_move != null else null,
+		"turn": turn,
+		"in_check": engine.is_in_check(turn),
+	}
 
 # True when the current position (same pieces, same side to move) has now
 # occurred three times.
