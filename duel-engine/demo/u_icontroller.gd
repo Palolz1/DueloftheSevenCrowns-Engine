@@ -520,6 +520,15 @@ func _create_ui():
 	new_game_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	new_game_btn.pressed.connect(_on_new_game)
 	bottom_row.add_child(new_game_btn)
+	# "Closing it out": next position, once the game is over
+	_next_position_btn = UITheme.button("Another position", "primary", 15, 44)
+	_next_position_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_next_position_btn.visible = false
+	_next_position_btn.pressed.connect(func():
+		_next_position_btn.disabled = true
+		_next_position_btn.text = "Finding…"
+		get_parent().next_closeout())
+	bottom_row.add_child(_next_position_btn)
 
 
 # ---- Undo / puzzle mode -----------------------------------------------------
@@ -559,14 +568,27 @@ func set_puzzle_mode(on: bool, title: String = "", prompt: String = ""):
 # "Closing it out": a normal game against the computer from a winning
 # position, so only the controls that would make it trivial are hidden.
 var idle_status := ""   # status line shown when nothing else is (closeout goal)
+var _next_position_btn: Button
 
 func set_closeout_mode(on: bool):
 	if not on:
 		idle_status = ""
+	_next_position_btn.visible = false
+	_next_position_btn.disabled = false
+	_next_position_btn.text = "Another position"
+	UITheme.style_button(new_game_btn, "primary")
 	hint_toggle.visible = not on
 	undo_btn.visible = not on
 	clear_drawings_btn.get_parent().columns = 3 if on else 4
 	new_game_btn.text = "All puzzles" if on else "New game"
+
+# Closeout game finished: reviewing is allowed to use "Show best move",
+# and the next position is one click away in the sidebar too.
+func on_closeout_finished():
+	idle_status = ""
+	hint_toggle.visible = true
+	_next_position_btn.visible = true
+	UITheme.style_button(new_game_btn, "secondary")
 
 func set_puzzle_feedback(text: String, color: Color):
 	_puzzle_feedback.text = text

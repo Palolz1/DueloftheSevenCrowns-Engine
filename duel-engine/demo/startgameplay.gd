@@ -267,6 +267,8 @@ func _on_turn_changed(new_turn: String):
 
 func _on_game_ended(reason: String, winner: String):
 	_update_undo_button()
+	if closeout_active:
+		ui_controller.on_closeout_finished()
 	if puzzle_active:
 		game_state.stop_hint_search()
 		return   # handled by _puzzle_after_move / the solution playback
