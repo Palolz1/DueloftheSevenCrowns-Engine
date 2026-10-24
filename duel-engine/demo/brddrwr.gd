@@ -1,172 +1,202 @@
 # brddrwr.gd
-extends Control
+# Board annotations, the way chess sites do them:
+#   right-click a square        -> mark it (again to remove)
+#   right-drag square to square -> arrow (again to remove)
+#   hold Shift / Ctrl / Alt     -> red / blue / yellow instead of green
+#   left-click the board, C, or the Clear button -> remove everything
+# Marks are drawn by BoardRenderer underneath the pieces; arrows are drawn
+# here, above the pieces. This node is a CanvasGroup so the arrows are made
+# see-through as a whole: crossing or bending arrows don't get darker where
+# their parts overlap.
+# Everything is stored in board squares (row, col), so it survives flips.
+extends CanvasGroup
 
-const SQUARE_SIZE: float = 80.0
-const BOARD_SQUARES: int = 7
+const CELL := 80.0
+const OPACITY := 0.82
 
-var arrow_color: Color = Color("#fbbf24")
+const COLORS := {
+	"green":  Color("#2fbf71"),
+	"red":    Color("#e8485c"),
+	"blue":   Color("#4c8dff"),
+	"yellow": Color("#f2c230"),
+}
 
-var _is_dragging: bool = false
-var _drag_start: Vector2i = Vector2i(-1, -1)
-var _drag_end: Vector2i = Vector2i(-1, -1)
-var _arrows: Array = []
-var _highlights: Array = []
-# Mirrors BoardRenderer.flipped. Arrows/highlights are stored in BOARD
-# squares, so they stay on the right squares when the board is flipped.
-var flipped := false
+var board = null            # BoardRenderer (set by StartGameplay)
+var flipped := false        # kept for the old API; BoardRenderer decides
+var arrows: Array = []      # {from: Vector2i(row, col), to: Vector2i, color: String}
+var marks: Array = []       # {sq: Vector2i, color: String}
 
-func set_flipped(f: bool):
-	flipped = f
-	queue_redraw()
+var _drag_from := Vector2i(-1, -1)
+var _drag_to := Vector2i(-1, -1)
+var _drag_color := "green"
+var _canvas: Node2D
+
 
 func _ready():
-	z_index = 100
-	# Never block clicks for the UI underneath; right-drag handling uses _input.
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# Size to cover the board exactly so hit-testing is correct
-	size = Vector2(BOARD_SQUARES * SQUARE_SIZE, BOARD_SQUARES * SQUARE_SIZE)
+	z_index = 50
+	self_modulate = Color(1, 1, 1, OPACITY)
+	# Draw on a child: a CanvasGroup composites its children.
+	_canvas = Node2D.new()
+	_canvas.draw.connect(_draw_arrows)
+	add_child(_canvas)
 
-# Call this from startgameplay.gd after board_renderer is positioned:
-#   arrow_layer.position = board_renderer.position
+
 func align_to_board(board_global_pos: Vector2):
 	global_position = board_global_pos
 
+
+func set_flipped(f: bool):
+	flipped = f
+	_redraw()
+
+
 func clear_arrows():
-	_arrows.clear()
-	_highlights.clear()
-	queue_redraw()
-
-func _input(event: InputEvent):
-	if event is InputEventKey and event.pressed and event.keycode == KEY_C:
-		clear_arrows()
+	if arrows.is_empty() and marks.is_empty():
 		return
+	arrows.clear()
+	marks.clear()
+	_redraw()
 
-	var info = get_parent().get_parent().get_node_or_null("Info")
+
+# ---- Input ----------------------------------------------------------------
+func _input(event: InputEvent):
+	if board == null or not board.visible:
+		return
+	var root := get_parent().get_parent()
+	var info = root.get_node_or_null("Info") if root != null else null
 	if info != null and info.visible:
 		return
 
-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
-		if event.pressed:
-			var sq = _pixel_to_square(get_global_mouse_position())
-			if sq.x >= 0:
-				_is_dragging = true
-				_drag_start = sq
-				_drag_end = sq
-				queue_redraw()
-		else:
-			_is_dragging = false
-			var from = _drag_start
-			var to = _pixel_to_square(get_global_mouse_position())
-			_drag_start = Vector2i(-1, -1)
-			_drag_end = Vector2i(-1, -1)
-			if from.x >= 0 and to.x >= 0 and from != to:
-				_toggle_arrow(from, to)
-			elif from.x >= 0 and to == from:
-				_toggle_highlight(from)
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_C:
+		clear_arrows()
+		return
+
+	var sq := _square_under_mouse()
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed and sq.x >= 0:
+				_drag_from = sq
+				_drag_to = sq
+				_drag_color = _color_from_modifiers(event)
+				_redraw()
+			elif not event.pressed and _drag_from.x >= 0:
+				var from := _drag_from
+				_drag_from = Vector2i(-1, -1)
+				_drag_to = Vector2i(-1, -1)
+				if sq == from:
+					_toggle_mark(from, _drag_color)
+				elif sq.x >= 0:
+					_toggle_arrow(from, sq, _drag_color)
+				_redraw()
+		elif event.button_index == MOUSE_BUTTON_LEFT and event.pressed and sq.x >= 0:
+			clear_arrows()
+	elif event is InputEventMouseMotion and _drag_from.x >= 0:
+		if sq.x >= 0 and sq != _drag_to:
+			_drag_to = sq
+			_redraw()
+
+
+func _square_under_mouse() -> Vector2i:
+	return board.local_to_board(board.get_local_mouse_position())
+
+
+func _color_from_modifiers(e: InputEventWithModifiers) -> String:
+	if e.shift_pressed:
+		return "red"
+	if e.ctrl_pressed or e.meta_pressed:
+		return "blue"
+	if e.alt_pressed:
+		return "yellow"
+	return "green"
+
+
+# Same shape and colour again removes it; another colour recolours it.
+func _toggle_arrow(from: Vector2i, to: Vector2i, color: String):
+	for i in arrows.size():
+		if arrows[i].from == from and arrows[i].to == to:
+			if arrows[i].color == color:
+				arrows.remove_at(i)
 			else:
-				queue_redraw()
-
-	if event is InputEventMouseMotion and _is_dragging:
-		var sq = _pixel_to_square(get_global_mouse_position())
-		if sq != _drag_end:
-			_drag_end = sq
-			queue_redraw()
-
-func _toggle_highlight(sq: Vector2i):
-	for i in range(_highlights.size()):
-		if _highlights[i] == sq:
-			_highlights.remove_at(i)
-			queue_redraw()
+				arrows[i].color = color
 			return
-	_highlights.append(sq)
-	queue_redraw()
+	arrows.append({"from": from, "to": to, "color": color})
 
-func _toggle_arrow(from_sq: Vector2i, to_sq: Vector2i):
-	for i in range(_arrows.size()):
-		if _arrows[i].from == from_sq and _arrows[i].to == to_sq:
-			_arrows.remove_at(i)
-			queue_redraw()
+
+func _toggle_mark(sq: Vector2i, color: String):
+	for i in marks.size():
+		if marks[i].sq == sq:
+			if marks[i].color == color:
+				marks.remove_at(i)
+			else:
+				marks[i].color = color
 			return
-	_arrows.append({"from": from_sq, "to": to_sq})
-	queue_redraw()
-
-# Converts a global mouse position to a board square (col, row).
-# Returns (-1,-1) if outside the board.
-func _pixel_to_square(global_pos: Vector2) -> Vector2i:
-	var local = global_pos - global_position
-	if local.x < 0 or local.y < 0:
-		return Vector2i(-1, -1)
-	var col = int(local.x / SQUARE_SIZE)
-	var row = int(local.y / SQUARE_SIZE)
-	if col >= 0 and col < BOARD_SQUARES and row >= 0 and row < BOARD_SQUARES:
-		if flipped:
-			return Vector2i(6 - col, 6 - row)
-		return Vector2i(col, row)
-	return Vector2i(-1, -1)
+	marks.append({"sq": sq, "color": color})
 
 
-# Returns the center of a square in LOCAL coordinates.
-# sq.x = col, sq.y = row
-func _square_center(sq: Vector2i) -> Vector2:
-	var v := Vector2i(6 - sq.x, 6 - sq.y) if flipped else sq
-	return Vector2(
-		v.x * SQUARE_SIZE + SQUARE_SIZE * 0.5,
-		v.y * SQUARE_SIZE + SQUARE_SIZE * 0.5
-	)
+func _redraw():
+	if _canvas != null:
+		_canvas.queue_redraw()
+	if board != null:
+		var m := []
+		for mk in marks:
+			m.append({"sq": mk.sq, "color": COLORS[mk.color]})
+		board.set_marks(m)
 
-func _is_l_move(from_sq: Vector2i, to_sq: Vector2i) -> bool:
-	var d = to_sq - from_sq
-	return (abs(d.x) == 2 and abs(d.y) == 1) or (abs(d.x) == 1 and abs(d.y) == 2) \
-		or (abs(d.x) == 3 and abs(d.y) == 1) or (abs(d.x) == 1 and abs(d.y) == 3)
 
-func _draw():
-	for sq in _highlights:
-		var pos = _square_center(sq)
-		var half = SQUARE_SIZE * 0.5
-		draw_rect(
-			Rect2(pos.x - half, pos.y - half, SQUARE_SIZE, SQUARE_SIZE),
-			Color(0.9, 0.2, 0.2, 0.4)
-		)
+# ---- Drawing --------------------------------------------------------------
+func _center(sq: Vector2i) -> Vector2:
+	return board.cell_center(sq.x, sq.y) if board != null else Vector2.ZERO
 
-	for a in _arrows:
-		_draw_arrow(a.from, a.to, arrow_color)
 
-	if _is_dragging and _drag_start.x >= 0 and _drag_end.x >= 0 and _drag_start != _drag_end:
-		_draw_arrow(_drag_start, _drag_end, Color(arrow_color.r, arrow_color.g, arrow_color.b, 0.5))
+func _draw_arrows():
+	if board == null:
+		return
+	for a in arrows:
+		_draw_arrow(a.from, a.to, COLORS[a.color])
+	if _drag_from.x >= 0 and _drag_to.x >= 0 and _drag_to != _drag_from:
+		var c: Color = COLORS[_drag_color]
+		_draw_arrow(_drag_from, _drag_to, Color(c, 0.6))
 
-func _draw_arrow(from_sq: Vector2i, to_sq: Vector2i, color: Color):
-	var from_pos := _square_center(from_sq)
-	var to_pos := _square_center(to_sq)
-	var lw := SQUARE_SIZE * 0.09
-	var hs := SQUARE_SIZE * 0.28
 
-	if _is_l_move(from_sq, to_sq):
-		var d := to_sq - from_sq
-		# Travel along the longer axis first, then the shorter
-		var bend_sq: Vector2i
-		if abs(d.x) > abs(d.y):
-			bend_sq = Vector2i(to_sq.x, from_sq.y)
-		else:
-			bend_sq = Vector2i(from_sq.x, to_sq.y)
-		var bend := _square_center(bend_sq)
-		var dir := (to_pos - bend).normalized()
+# Leaping moves (Knight 2+1, Paladin 3+1) get an L-shaped arrow, like a
+# knight arrow in chess: along the longer side first, then the short one.
+static func _is_leap(d: Vector2i) -> bool:
+	var a := absi(d.x)
+	var b := absi(d.y)
+	return (a == 1 and (b == 2 or b == 3)) or (b == 1 and (a == 2 or a == 3))
 
-		draw_line(from_pos, bend, color, lw, true)
-		draw_line(bend, to_pos - dir * hs * 0.8, color, lw, true)
-		draw_circle(bend, lw * 0.7, color)
-		_draw_arrowhead(to_pos, dir, hs, color)
-	else:
-		var dir := (to_pos - from_pos).normalized()
-		# Pull the tail off the center so it doesn't overlap the piece token
-		var start := from_pos + dir * SQUARE_SIZE * 0.28
-		var end := to_pos - dir * hs * 0.8
-		draw_line(start, end, color, lw, true)
-		_draw_arrowhead(to_pos, dir, hs, color)
 
-func _draw_arrowhead(tip: Vector2, dir: Vector2, head_size: float, color: Color):
-	var perp := Vector2(-dir.y, dir.x)
-	var base := tip - dir * head_size
-	draw_colored_polygon(
-		PackedVector2Array([tip, base + perp * head_size * 0.45, base - perp * head_size * 0.45]),
-		color
-	)
+func _draw_arrow(from: Vector2i, to: Vector2i, color: Color):
+	var w := CELL * 0.17          # shaft width
+	var head_len := CELL * 0.42
+	var head_w := CELL * 0.50
+	var p0 := _center(from)
+	var p2 := _center(to)
+	var pts: Array = [p0]
+	var d := to - from
+	if _is_leap(d):
+		# bend at the square that shares the row/col of the long leg
+		var bend := Vector2i(to.x, from.y) if absi(d.x) > absi(d.y) else Vector2i(from.x, to.y)
+		pts.append(_center(bend))
+	pts.append(p2)
+
+	# stop the tip a little short of the target centre
+	var last_dir: Vector2 = (pts[-1] - pts[-2]).normalized()
+	var tip: Vector2 = pts[-1] - last_dir * CELL * 0.10
+	var head_base: Vector2 = tip - last_dir * head_len
+	pts[-1] = head_base
+
+	# shaft (round start, square joint at the bend)
+	draw_circle_on(pts[0], w * 0.5, color)
+	for i in pts.size() - 1:
+		_canvas.draw_line(pts[i], pts[i + 1], color, w, true)
+	if pts.size() == 3:
+		_canvas.draw_rect(Rect2(pts[1] - Vector2(w, w) * 0.5, Vector2(w, w)), color)
+	# head
+	var perp := Vector2(-last_dir.y, last_dir.x)
+	_canvas.draw_colored_polygon(PackedVector2Array([
+		tip, head_base + perp * head_w * 0.5, head_base - perp * head_w * 0.5]), color)
+
+
+func draw_circle_on(p: Vector2, r: float, color: Color):
+	_canvas.draw_circle(p, r, color, true, -1.0, true)

@@ -8,7 +8,6 @@
 [ext_resource type="Script" uid="uid://cjbs1xxpijcar" path="res://u_icontroller.gd" id="5_4rw7v"]
 [ext_resource type="Script" uid="uid://bqejal4jf6lwv" path="res://bot_diff.gd" id="5_7op6v"]
 [ext_resource type="Script" uid="uid://b71336tpsnt42" path="res://info.gd" id="7_1alog"]
-[ext_resource type="Script" uid="uid://7ql0hgsm718s" path="res://brddrwr.gd" id="7_4rw7v"]
 
 [node name="Startgameplay" type="Node2D" unique_id=1375893414]
 script = ExtResource("1_rn54c")
@@ -41,11 +40,6 @@ script = ExtResource("5_7op6v")
 
 [node name="UIcontroller" type="CanvasLayer" parent="." unique_id=147660650]
 script = ExtResource("5_4rw7v")
-
-[node name="brddrwr" type="Control" parent="UIcontroller" unique_id=695396034]
-layout_mode = 3
-anchors_preset = 0
-script = ExtResource("7_4rw7v")
 
 [node name="Info" type="CanvasLayer" parent="." unique_id=543916010]
 script = ExtResource("7_1alog")

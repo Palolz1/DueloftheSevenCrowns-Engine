@@ -58,6 +58,24 @@ var _hover_moves: Array = []
 var _hovered: Array = []
 var _game_over := false
 
+# Right-click square marks from the drawing layer (brddrwr.gd), drawn here
+# so they sit underneath the pieces: [{sq: Vector2i(row, col), color}].
+var marks: Array = []
+
+
+func set_marks(m: Array) -> void:
+	marks = m
+	queue_redraw()
+
+
+func _draw_marks():
+	for mk in marks:
+		var rect := Rect2(cell_pos(mk.sq.x, mk.sq.y), Vector2(CELL_SIZE, CELL_SIZE))
+		var c: Color = mk.color
+		draw_rect(rect, Color(c, 0.42))
+		draw_rect(rect.grow(-3.0), Color(c, 0.95), false, 5.0)
+
+
 # Puzzle hint: a square that pulses gold until the next move.
 var hint_square: Array = []
 var _blink_t := 0.0
@@ -152,6 +170,7 @@ func _draw():
 	if _board.is_empty():
 		return
 	_draw_highlights()
+	_draw_marks()
 	_draw_hint_square()
 	if Settings.get_value("show_legal"):
 		_draw_legal_moves()

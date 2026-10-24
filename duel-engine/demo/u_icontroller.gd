@@ -245,7 +245,7 @@ var new_game_btn: Button
 var flip_btn: Button
 var info_btn: Button
 var clear_drawings_btn: Button
-var board_drawer: Control = null
+var board_drawer: Node = null   # brddrwr.gd (arrows and square marks)
 
 var top_bar: PlayerBar
 var bottom_bar: PlayerBar
@@ -495,7 +495,7 @@ func _create_ui():
 	flip_btn.pressed.connect(_on_flip_pressed)
 	grid.add_child(flip_btn)
 	clear_drawings_btn = UITheme.button("Clear", "secondary", 14, 38)
-	clear_drawings_btn.tooltip_text = "Remove right-click arrows (C)"
+	clear_drawings_btn.tooltip_text = "Remove arrows and marked squares (C)"
 	clear_drawings_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	clear_drawings_btn.pressed.connect(_on_clear_drawings_pressed)
 	grid.add_child(clear_drawings_btn)

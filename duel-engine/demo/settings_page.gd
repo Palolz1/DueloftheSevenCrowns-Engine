@@ -96,7 +96,10 @@ func _ready():
 	grid.add_theme_constant_override("v_separation", 4)
 	keys.add_child(grid)
 	for k in [["F", "Flip the board"], ["E", "Show / hide the evaluation"], ["I", "How the pieces move"],
-			["C", "Clear right-click arrows"], ["Ctrl+Z", "Undo your last move"], ["← → Home End", "Step through a finished game"]]:
+			["Ctrl+Z", "Undo your last move"], ["← → Home End", "Step through a finished game"],
+			["Right-click", "Mark a square (drag to draw an arrow)"],
+			["+ Shift / Ctrl / Alt", "Red / blue / yellow instead of green"],
+			["C or left-click", "Clear arrows and marks"]]:
 		grid.add_child(UITheme.label(k[0], 13, UITheme.GOLD_LIGHT, UITheme.ui(700)))
 		grid.add_child(UITheme.label(k[1], 13, UITheme.TEXT_DIM, UITheme.ui(500)))
 

@@ -53,6 +53,7 @@ func _ready():
 	board_renderer.position = BOARD_ORIGIN
 	await get_tree().process_frame  # wait one frame so CanvasLayer children are ready
 	ui_controller.align_drawer_to_board(board_renderer.global_position)
+	ui_controller.board_drawer.board = board_renderer
 	game_state.board_changed.connect(_on_board_changed)
 	input_handler.square_clicked.connect(_on_square_clicked)
 	input_handler.square_hovered.connect(_on_square_hovered)
