@@ -29,6 +29,15 @@ const SAPPHIRE := Color("#5b8df0")
 const AMETHYST := Color("#a77bf2")
 const AMBER := Color("#f0a640")
 
+# The seven computer levels, weakest -> strongest. Players see noble titles;
+# the ids are what the code uses internally (bot_diff, startgameplay).
+# Count..Grand Prince are the "human-like" bots that make deliberate
+# mistakes; King and Emperor -- the two sovereign titles -- are the full
+# engine with no deliberate mistakes.
+const LEVEL_IDS := ["beginner", "novice", "easy", "medium", "hard", "expert", "impossible"]
+const LEVEL_TITLES := ["Count", "Marquess", "Duke", "Archduke", "Grand Prince", "King", "Emperor"]
+const LEVEL_DIFFICULTY := ["Beginner", "Novice", "Easy", "Medium", "Hard", "Expert", "Impossible"]
+
 # Difficulty ladder colours, weakest -> strongest
 const LEVEL_COLORS := [
 	Color("#7ddc9e"), Color("#4fc6a6"), Color("#58b4e8"), Color("#e2b65a"),

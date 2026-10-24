@@ -20,14 +20,16 @@ var armageddon_white_minutes: float = 10.0
 var armageddon_black_minutes: float = 8.0
 
 # The difficulty ladder, weakest first. Position in the list = crowns lit.
+# Titles come from UITheme.LEVEL_TITLES; each description leads with the
+# plain difficulty word so new players can still read the ladder.
 const LEVELS: Array[Dictionary] = [
-	{ "id": "beginner",   "label": "Beginner",   "desc": "Plays almost at random" },
-	{ "id": "novice",     "label": "Novice",     "desc": "Knows the moves, misses a lot" },
-	{ "id": "easy",       "label": "Easy",       "desc": "Casual player, often slips" },
-	{ "id": "medium",     "label": "Medium",     "desc": "Solid, still makes mistakes" },
-	{ "id": "hard",       "label": "Hard",       "desc": "Strong and rarely careless" },
-	{ "id": "expert",     "label": "Expert",     "desc": "Full engine, quick thinker" },
-	{ "id": "impossible", "label": "Impossible", "desc": "Full engine, thinks for ages" },
+	{ "id": "beginner",   "label": "Count",        "desc": "Beginner · nearly random moves" },
+	{ "id": "novice",     "label": "Marquess",     "desc": "Novice · misses a lot" },
+	{ "id": "easy",       "label": "Duke",         "desc": "Easy · casual, slips a lot" },
+	{ "id": "medium",     "label": "Archduke",     "desc": "Medium · solid, still errs" },
+	{ "id": "hard",       "label": "Grand Prince", "desc": "Hard · strong, rarely careless" },
+	{ "id": "expert",     "label": "King",         "desc": "Expert · full engine, quick" },
+	{ "id": "impossible", "label": "Emperor",      "desc": "Impossible · full engine, no mercy" },
 ]
 
 const PERSONALITIES: Array[Dictionary] = [
@@ -345,7 +347,7 @@ func _level_row(lv: Dictionary, level: int, accent: Color) -> Button:
 	meter.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(meter)
 	var nm := UITheme.label(lv.label, 15, UITheme.TEXT, UITheme.ui(650))
-	nm.custom_minimum_size = Vector2(96, 0)
+	nm.custom_minimum_size = Vector2(108, 0)
 	nm.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(nm)

@@ -440,11 +440,14 @@ func set_orientation(flipped: bool):
 # ---------------------------------------------------------------------------
 # Players / clocks
 # ---------------------------------------------------------------------------
-const LEVELS := ["beginner", "novice", "easy", "medium", "hard", "expert", "impossible"]
+const LEVELS := UITheme.LEVEL_IDS
 
 func _bot_label(type: String) -> String:
 	if type == "human":
 		return "Human"
+	var lvl := LEVELS.find(type)
+	if lvl >= 0:
+		return "The " + UITheme.LEVEL_TITLES[lvl]
 	return type.capitalize() + " Bot"
 
 func _bot_sub(type: String) -> String:
@@ -452,7 +455,7 @@ func _bot_sub(type: String) -> String:
 		return "Human player"
 	var lvl := LEVELS.find(type)
 	if lvl >= 0:
-		return "Computer  ·  Level %d of 7" % (lvl + 1)
+		return "Computer  ·  Level %d of 7  ·  %s" % [lvl + 1, UITheme.LEVEL_DIFFICULTY[lvl]]
 	return "Computer  ·  Personality"
 
 func set_player_labels(white: String, black: String):
