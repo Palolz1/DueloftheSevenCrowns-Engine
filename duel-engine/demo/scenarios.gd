@@ -98,8 +98,8 @@ const LIST := [
 	 "verdict": "Black +7.6", "tone": "black",
 	 "rows": ["wC wN wP wK wW wN .", "wD wD wD wD wD wD wD", ". . . . . . .", ". . . . . . .", ". . . . . . .", "bD bD bD bD bD bD bD", "bC bN bP bK bW bN bM"]},
 	{"id": "lancer_brigade", "category": "uneven", "name": "Lancer Brigade",
-	 "desc": "Black's back rank is six Lancers, the piece donkeys promote to. Leaping attacks from the very first move.",
-	 "verdict": "Black · won 6 of 6", "tone": "black",
+	 "desc": "Black's back rank is six Lancers. White has exactly one first move that saves the game. Can you find it?",
+	 "verdict": "Black +9.5", "tone": "black",
 	 "rows": ["wC wN wP wK wW wN wM", "wD wD wD wD wD wD wD", ". . . . . . .", ". . . . . . .", ". . . . . . .", "bD bD bD bD bD bD bD", "bL bL bL bK bL bL bL"]},
 	{"id": "twin_marshals", "category": "uneven", "name": "Twin Marshals",
 	 "desc": "White keeps only two Marshals and its donkeys to face a full army.",
@@ -119,7 +119,7 @@ const LIST := [
 	 "rows": ["wD wD wD wK wD wD wD", "wD wD wD wD wD wD wD", "wD wD wD wD wD wD wD", ". . . . . . .", ". . . . . . .", "bD bD bD bD bD bD bD", "bC bN bP bK bW bN bM"]},
 	{"id": "god_army", "category": "uneven", "name": "God Army",
 	 "desc": "Black fills three ranks with heavy pieces. Survive as White, if you can.",
-	 "verdict": "Black has a forced win", "tone": "black",
+	 "verdict": "Black mates in 9", "tone": "black",
 	 "rows": ["wC wN wP wK wW wN wM", "wD wD wD wD wD wD wD", ". . . . . . .", ". . . . . . .", "bC bD bC bD bC bD bC", "bP bM bW bN bW bM bP", "bM bP bC bK bC bP bM"]},
 ]
 
