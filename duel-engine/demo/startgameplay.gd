@@ -293,8 +293,13 @@ func _schedule_bot_move(player_type: String):
 		if remaining > 0.0:
 			time_limit = min(time_limit, max(0.1, remaining * 0.4))
 
+	var gen: int = game_state.game_gen
 	await get_tree().create_timer(0.05).timeout
+	if gen != game_state.game_gen:
+		return   # New game was pressed; that game schedules its own bots
 	await _do_bot_move(player_type, time_limit)
+	if gen != game_state.game_gen:
+		return
 	_bot_scheduled = false
 	input_handler.set_process_input(true)
 	_start_turn()
@@ -302,8 +307,9 @@ func _schedule_bot_move(player_type: String):
 func _do_bot_move(player_type: String, time_limit: float):
 	if game_state.game_over:
 		return
+	var gen: int = game_state.game_gen
 	var result = await game_state.request_bot_move(player_type, time_limit)
-	if result.is_empty():
+	if result.is_empty() or gen != game_state.game_gen:
 		return
 
 	_is_animating = true
@@ -319,6 +325,8 @@ func _do_bot_move(player_type: String, time_limit: float):
 		piece_animator.animate_move(result.from_row, result.from_col, result.to_row, result.to_col, piece)
 		await piece_animator.move_finished
 
+	if gen != game_state.game_gen:
+		return   # board was reset during the animation
 	_is_animating = false
 	game_state.execute_move(result.from_row, result.from_col, result.to_row, result.to_col)
 
@@ -331,6 +339,7 @@ func new_game():
 	_winner = ""
 	_hovered_square = []
 	game_state.reset_game()
+	input_handler.set_process_input(true)   # a cancelled bot move may have left it off
 	ui_controller.hint_toggle.button_pressed = false
 	_show_player_setup()
 

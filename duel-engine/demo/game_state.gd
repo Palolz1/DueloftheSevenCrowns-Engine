@@ -32,6 +32,7 @@ var hint_arrow = null
 var hint_score: float = 0.0
 var hint_mate: String = ""
 var bot_thread: Thread = null
+var game_gen := 0   # bumped on every reset_game(); stale bot moves are dropped
 var _bot_result: Dictionary = {}
 var _bot_done: bool = false
 var _bot_mutex: Mutex = Mutex.new()
@@ -307,7 +308,13 @@ func _on_hint_result(result: Dictionary, gen: int):
 	board_changed.emit()
 
 func reset_game():
+	# A bot may still be thinking about the old game: end its search early,
+	# wait for the thread, and bump game_gen so the waiting coroutine in
+	# request_bot_move() knows its result belongs to a game that is gone.
+	game_gen += 1
 	if bot_thread != null and bot_thread.is_started():
+		if fairy != null:
+			fairy.stop_search()
 		bot_thread.wait_to_finish()
 	bot_thread = null
 	_stop_hint_thread()
@@ -570,19 +577,27 @@ func request_bot_move(difficulty: String, time_limit: float) -> Dictionary:
 	_bot_result = {}
 	_bot_done = false
 
-	bot_thread = Thread.new()
-	bot_thread.start(_bot_worker.bind(difficulty, time_limit))
+	var gen := game_gen
+	var thread := Thread.new()
+	bot_thread = thread
+	thread.start(_bot_worker.bind(difficulty, time_limit))
 
 	while true:
 		_bot_mutex.lock()
 		var done = _bot_done
 		_bot_mutex.unlock()
-		if done:
+		if done or gen != game_gen:
 			break
 		await get_tree().process_frame
 
-	bot_thread.wait_to_finish()
-	bot_thread = null
+	# New game pressed while this bot was thinking: reset_game() has already
+	# joined the thread, so just throw the move away.
+	if gen != game_gen:
+		return {}
+	if thread.is_started():
+		thread.wait_to_finish()
+	if bot_thread == thread:
+		bot_thread = null
 
 	thinking_finished.emit()
 	var result = _bot_result

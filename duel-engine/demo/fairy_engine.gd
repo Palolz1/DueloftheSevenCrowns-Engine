@@ -100,6 +100,14 @@ func new_game() -> void:
 	_mutex.unlock()
 
 
+# Asks a running search to finish now (UCI "stop"). Called from the main
+# thread while a worker thread is blocked reading the reply, so it skips the
+# mutex on purpose; the engine answers with its bestmove right away.
+func stop_search() -> void:
+	if ok:
+		_send("stop")
+
+
 func shutdown() -> void:
 	if _pid > 0:
 		if _stdio != null:
