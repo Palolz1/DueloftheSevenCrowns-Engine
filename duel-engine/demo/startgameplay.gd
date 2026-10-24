@@ -490,7 +490,7 @@ func _on_settings_changed():
 # Puzzles
 # ---------------------------------------------------------------------------
 func start_puzzle(id: String):
-	var p := Puzzles.get_puzzle(id)
+	var p: Dictionary = PuzzleGen.get_instance(get_tree()).current if id == "random" else Puzzles.get_puzzle(id)
 	if p.is_empty():
 		return
 	if player_setup != null and is_instance_valid(player_setup):
@@ -518,18 +518,24 @@ func start_puzzle(id: String):
 	game_state.reset_game()
 	game_state.setup_clock("untimed", 0.0, 0.0)
 	ui_controller.reset_for_new_game()
-	ui_controller.set_mode_name("Puzzle " + p.id.to_upper())
+	ui_controller.set_mode_name("Random puzzle" if p.get("random", false) else "Puzzle " + p.id.to_upper())
 	ui_controller.set_player_labels(white_player, black_player)
 	ui_controller.set_clocks_visible(false)
 	ui_controller.hint_toggle.button_pressed = false
-	var moves_to_find: int = (p.line.size() + 1) / 2
+	_random_moves_left = int(p.get("n", 0))
+	var moves_to_find: int = p.n if p.get("random", false) else (p.line.size() + 1) / 2
 	var prompt := "%s to move. " % puzzle_color.capitalize()
 	match p.theme:
 		"win": prompt += "One move wins material. Find it."
 		"mate1": prompt += "Checkmate in one move."
 		_: prompt += "Force checkmate in %d moves." % moves_to_find
-	var solved := Puzzles.status(p.id) in ["solved", "clean"]
+	var solved: bool = Puzzles.status(p.id) in ["solved", "clean"] and not p.get("random", false)
 	ui_controller.set_puzzle_mode(true, Puzzles.theme_name(p.theme), prompt)
+	if p.get("random", false):
+		var streak := Puzzles.random_stat("streak")
+		if streak > 1:
+			ui_controller.set_puzzle_feedback("Streak: %d solved in a row" % streak, UITheme.TEXT_FAINT)
+		PuzzleGen.get_instance(get_tree()).prefetch(int(p.target))
 	if solved:
 		ui_controller.set_puzzle_feedback("Already solved. Play it again?", UITheme.TEXT_FAINT)
 	flipped = puzzle_color == "white"   # your side at the bottom
@@ -551,6 +557,9 @@ func _leave_puzzle_mode():
 	ui_controller.set_puzzle_mode(false)
 
 func _puzzle_after_move():
+	if puzzle.get("random", false):
+		_random_after_move()
+		return
 	var gen: int = game_state.game_gen
 	var played: String = game_state.uci_moves.back()
 	var expected: String = puzzle.line[puzzle_step]
@@ -595,9 +604,16 @@ func _puzzle_solved():
 	_puzzle_done = true
 	game_state.game_over = true
 	game_state.stop_hint_search()
-	Puzzles.set_status(puzzle.id, "clean" if puzzle_clean else "solved")
 	var msg := "Solved!" if puzzle_clean else "Solved, after a little help."
-	ui_controller.set_puzzle_feedback("%s  %d of %d puzzles done." % [msg, Puzzles.solved_count(), Puzzles.LIST.size()], UITheme.EMERALD)
+	if puzzle.get("random", false):
+		Puzzles.add_random_result(int(puzzle.n), true, puzzle_clean)
+		var streak := Puzzles.random_stat("streak")
+		var total := Puzzles.random_solved_total()
+		ui_controller.set_puzzle_feedback("%s  %d random puzzle%s solved%s." % [msg, total, "" if total == 1 else "s",
+			(", streak %d" % streak) if streak > 1 else ""], UITheme.EMERALD)
+	else:
+		Puzzles.set_status(puzzle.id, "clean" if puzzle_clean else "solved")
+		ui_controller.set_puzzle_feedback("%s  %d of %d puzzles done." % [msg, Puzzles.solved_count(), Puzzles.LIST.size()], UITheme.EMERALD)
 	ui_controller.set_puzzle_buttons(false)
 	_update_undo_button()
 	_on_board_changed()
@@ -607,7 +623,17 @@ func puzzle_hint():
 	if not puzzle_active or _puzzle_done or _puzzle_busy or game_state.turn != puzzle_color:
 		return
 	puzzle_clean = false
-	var m := Puzzles.uci_to_move(puzzle.line[puzzle_step])
+	var mv: String
+	if puzzle.get("random", false):
+		_puzzle_busy = true
+		var r := await _engine_lines(1, 13)
+		_puzzle_busy = false
+		if r.is_empty() or not puzzle_active:
+			return
+		mv = r[0].move
+	else:
+		mv = puzzle.line[puzzle_step]
+	var m := Puzzles.uci_to_move(mv)
 	game_state.select_square(m.from_row, m.from_col)
 	ui_controller.set_puzzle_feedback("Hint: move the highlighted piece.", UITheme.GOLD_LIGHT)
 
@@ -617,10 +643,29 @@ func puzzle_show_solution():
 	puzzle_clean = false
 	_puzzle_busy = true
 	var gen: int = game_state.game_gen
-	Puzzles.set_status(puzzle.id, "revealed")
 	ui_controller.set_puzzle_feedback("Here is the solution.", UITheme.GOLD_LIGHT)
 	game_state.selected_square = []
 	game_state.legal_moves = []
+	if puzzle.get("random", false):
+		Puzzles.add_random_result(int(puzzle.n), false, false)
+		# play the engine's line (both sides) until the mate
+		while not game_state.game_over:
+			await get_tree().create_timer(0.55).timeout
+			if gen != game_state.game_gen or not puzzle_active:
+				return
+			var r := await _engine_lines(1, 13)
+			if r.is_empty() or gen != game_state.game_gen or not puzzle_active:
+				break
+			var mm := Puzzles.uci_to_move(r[0].move)
+			if not await _animate_and_play(mm.from_row, mm.from_col, mm.to_row, mm.to_col):
+				return
+		_puzzle_busy = false
+		_puzzle_done = true
+		game_state.game_over = true
+		ui_controller.set_puzzle_buttons(false)
+		_on_board_changed()
+		return
+	Puzzles.set_status(puzzle.id, "revealed")
 	while puzzle_step < puzzle.line.size():
 		await get_tree().create_timer(0.55).timeout
 		if gen != game_state.game_gen or not puzzle_active:
@@ -639,6 +684,11 @@ func puzzle_show_solution():
 func next_puzzle():
 	if _puzzle_busy and not _puzzle_done:
 		return
+	if puzzle.get("random", false):
+		if not _puzzle_done:
+			Puzzles.add_random_result(int(puzzle.n), false, false)   # skipped: streak ends
+		_next_random(int(puzzle.target))
+		return
 	var nid := Puzzles.next_unsolved(puzzle.get("id", ""))
 	if nid == "":
 		# everything solved: just go to the next one in the list
@@ -648,3 +698,70 @@ func next_puzzle():
 				idx = (i + 1) % Puzzles.LIST.size()
 		nid = Puzzles.LIST[idx].id
 	start_puzzle(nid)
+
+
+# ---------------------------------------------------------------------------
+# Random puzzles (puzzle_gen.gd): checked live by the engine
+# ---------------------------------------------------------------------------
+var _random_moves_left := 0   # your moves left to deliver mate
+
+# Engine lines for the current puzzle position, without blocking the UI.
+func _engine_lines(multipv: int, depth: int) -> Array:
+	var holder := {"done": false, "r": []}
+	PuzzleGen.get_instance(get_tree()).analyse_async(game_state.uci_moves.duplicate(), multipv, depth,
+		func(r):
+			holder.r = r
+			holder.done = true)
+	while not holder.done:
+		await get_tree().process_frame
+	return holder.r
+
+func _random_after_move():
+	var gen: int = game_state.game_gen
+	if game_state.game_over and _winner_is_solver():
+		_puzzle_solved()
+		return
+	_puzzle_busy = true
+	ui_controller.set_puzzle_feedback("Checking…", UITheme.TEXT_FAINT)
+	var left := _random_moves_left - 1
+	var good := false
+	var reply := ""
+	if left > 0 and not game_state.game_over:
+		var r := await _engine_lines(1, 14)
+		if gen != game_state.game_gen or not puzzle_active:
+			return
+		# the defender (to move) must be getting mated within `left` moves
+		if not r.is_empty() and r[0].mate < 0 and -int(r[0].mate) <= left:
+			good = true
+			reply = r[0].move
+	if good:
+		_random_moves_left = left
+		ui_controller.set_puzzle_feedback("Good move! Keep going.", UITheme.EMERALD)
+		await get_tree().create_timer(0.35).timeout
+		if gen != game_state.game_gen or not puzzle_active:
+			return
+		var m := Puzzles.uci_to_move(reply)
+		await _animate_and_play(m.from_row, m.from_col, m.to_row, m.to_col)
+		_puzzle_busy = false
+	else:
+		puzzle_clean = false
+		ui_controller.set_puzzle_feedback("That lets them escape. Try again.", UITheme.RUBY)
+		await get_tree().create_timer(0.7).timeout
+		if gen != game_state.game_gen or not puzzle_active:
+			return
+		game_state.undo_plies(1)
+		ui_controller.on_undo()
+		_puzzle_busy = false
+		_on_board_changed()
+
+# Finds (or takes the prefetched) next random puzzle and starts it.
+func _next_random(target: int):
+	var pg := PuzzleGen.get_instance(get_tree())
+	if not pg.ok:
+		return
+	_puzzle_busy = true
+	ui_controller.set_puzzle_feedback("Finding a new puzzle…", UITheme.TEXT_FAINT)
+	pg.request(target)
+	await pg.generated
+	if puzzle_active:   # still in puzzle mode (not back at the menu)
+		start_puzzle("random")

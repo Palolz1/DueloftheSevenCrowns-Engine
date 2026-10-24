@@ -30,6 +30,9 @@ func _ready():
 	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(list)
 
+	list.add_child(_random_card())
+	list.add_child(UITheme.spacer(false))
+
 	for th in Puzzles.THEMES:
 		var items := Puzzles.in_theme(th.id)
 		if items.is_empty():
@@ -48,6 +51,47 @@ func _ready():
 		for i in items.size():
 			grid.add_child(_tile(items[i], i + 1))
 		list.add_child(UITheme.spacer(false))
+
+
+# Endless random puzzles (puzzle_gen.gd)
+func _random_card() -> Control:
+	var card := UITheme.panel(UITheme.card(18))
+	var row := UITheme.hbox(24)
+	card.add_child(row)
+	var info := UITheme.vbox(4)
+	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(info)
+	info.add_child(UITheme.label("Random puzzle", 22, UITheme.GOLD_LIGHT, UITheme.display(700)))
+	var d := UITheme.label("A brand-new forced mate every time, found live in a fresh engine game. It never runs out.", 14, UITheme.TEXT_DIM, UITheme.ui(500))
+	d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info.add_child(d)
+	info.add_child(UITheme.label("%d solved  ·  mate in 2: %d  ·  in 3: %d  ·  in 4: %d  ·  best streak %d" % [
+		Puzzles.random_solved_total(), Puzzles.random_stat("m2"), Puzzles.random_stat("m3"),
+		Puzzles.random_stat("m4"), Puzzles.random_stat("best_streak")], 13, UITheme.TEXT_FAINT, UITheme.ui(600)))
+	var pg := PuzzleGen.get_instance(get_tree())
+	var btns := UITheme.hbox(8)
+	btns.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(btns)
+	if not pg.ok:
+		btns.add_child(UITheme.label("Needs Fairy-Stockfish", 14, UITheme.RUBY, UITheme.ui(600)))
+		return card
+	var all_buttons := []
+	for spec in [[2, "Mate in 2"], [3, "Mate in 3"], [4, "Mate in 4"], [0, "Surprise me"]]:
+		var b := UITheme.button(spec[1], "primary" if spec[0] == 0 else "secondary", 14, 44)
+		b.custom_minimum_size.x = 112
+		btns.add_child(b)
+		all_buttons.append(b)
+		b.pressed.connect(func():
+			for x in all_buttons:
+				x.disabled = true
+			b.text = "Finding…"
+			pg.generated.connect(_on_random_ready, CONNECT_ONE_SHOT)
+			pg.request(spec[0]))
+	return card
+
+
+func _on_random_ready(_p: Dictionary):
+	chosen.emit("random")
 
 
 func _tile(p: Dictionary, n: int) -> Button:

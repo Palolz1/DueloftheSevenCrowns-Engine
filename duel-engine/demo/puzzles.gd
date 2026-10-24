@@ -103,9 +103,14 @@ static func _ensure_loaded():
 	_loaded = true
 	_progress = {}
 	var cfg := ConfigFile.new()
-	if cfg.load(PROGRESS_PATH) == OK and cfg.has_section("progress"):
-		for k in cfg.get_section_keys("progress"):
-			_progress[k] = cfg.get_value("progress", k)
+	_random = {}
+	if cfg.load(PROGRESS_PATH) == OK:
+		if cfg.has_section("progress"):
+			for k in cfg.get_section_keys("progress"):
+				_progress[k] = cfg.get_value("progress", k)
+		if cfg.has_section("random"):
+			for k in cfg.get_section_keys("random"):
+				_random[k] = cfg.get_value("random", k)
 
 
 static func status(id: String) -> String:
@@ -121,10 +126,7 @@ static func set_status(id: String, st: String) -> void:
 	if rank.get(st, 0) <= rank.get(_progress.get(id, ""), 0):
 		return
 	_progress[id] = st
-	var cfg := ConfigFile.new()
-	for k in _progress:
-		cfg.set_value("progress", k, _progress[k])
-	cfg.save(PROGRESS_PATH)
+	_save()
 
 
 static func solved_count(theme: String = "") -> int:
@@ -138,8 +140,40 @@ static func solved_count(theme: String = "") -> int:
 
 static func reset_progress() -> void:
 	_progress = {}
+	_random = {}
 	_loaded = true
 	var cfg := ConfigFile.new()
+	cfg.save(PROGRESS_PATH)
+
+
+# ---- Random puzzles (puzzle_gen.gd) ----------------------------------------------
+static var _random := {}   # "m2"/"m3"/"m4" -> solved count, "streak", "best_streak"
+
+static func random_stat(key: String) -> int:
+	_ensure_loaded()
+	return int(_random.get(key, 0))
+
+static func random_solved_total() -> int:
+	return random_stat("m2") + random_stat("m3") + random_stat("m4")
+
+# clean: solved without a mistake, hint or solution (keeps the streak going)
+static func add_random_result(n: int, solved: bool, clean: bool) -> void:
+	_ensure_loaded()
+	if solved:
+		_random["m%d" % n] = random_stat("m%d" % n) + 1
+	if solved and clean:
+		_random["streak"] = random_stat("streak") + 1
+		_random["best_streak"] = max(random_stat("best_streak"), _random["streak"])
+	else:
+		_random["streak"] = 0
+	_save()
+
+static func _save() -> void:
+	var cfg := ConfigFile.new()
+	for k in _progress:
+		cfg.set_value("progress", k, _progress[k])
+	for k in _random:
+		cfg.set_value("random", k, _random[k])
 	cfg.save(PROGRESS_PATH)
 
 

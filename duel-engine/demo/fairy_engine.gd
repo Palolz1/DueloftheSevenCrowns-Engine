@@ -203,6 +203,46 @@ func score_all(moves: Array, depth: int, movetime_ms: int) -> Array:
 	return out
 
 
+# Top `multipv` lines for a position given as a FEN plus moves (doesn't use
+# or change the game's start position, so other threads can share the
+# engine). Returns [{move, mate, cp, depth}] best first; mate is from the
+# side to move's point of view (+3 = it mates in 3, -2 = it gets mated in 2).
+func analyse_fen(fen: String, moves: Array, multipv: int, depth: int, movetime_ms: int = 0) -> Array:
+	if not ok:
+		return []
+	_mutex.lock()
+	_set_skill(20)
+	_send("setoption name MultiPV value %d" % multipv)
+	var cmd := "position fen " + fen
+	if not moves.is_empty():
+		cmd += " moves " + " ".join(PackedStringArray(moves))
+	_send(cmd)
+	_send(_go_cmd(movetime_ms, depth))
+	var lines := {}
+	var n := 0
+	while n < MAX_LINES:
+		n += 1
+		var line = _read_line()
+		if line == null:
+			ok = false
+			break
+		if line.begins_with("info ") and line.contains(" score ") and line.contains(" pv ") and not line.contains("bound"):
+			var info := _parse_info(line)
+			var k := _field_int(line, "multipv", 1)
+			var pv: PackedStringArray = line.split(" pv ", false)[1].split(" ", false)
+			lines[k] = {"move": pv[0], "mate": info.mate_moves, "cp": info.score if info.mate_moves == 0 else 0, "depth": info.depth}
+		elif line.begins_with("bestmove"):
+			break
+	_send("setoption name MultiPV value 1")
+	_mutex.unlock()
+	var out := []
+	var keys := lines.keys()
+	keys.sort()
+	for k in keys:
+		out.append(lines[k])
+	return out
+
+
 # ------------------------------------------------------------------
 # Internals
 # ------------------------------------------------------------------
