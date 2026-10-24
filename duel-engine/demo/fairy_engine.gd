@@ -28,6 +28,7 @@ var last_error := ""
 var _stdio: FileAccess = null
 var _pid := -1
 var _skill := 20  # current "Skill Level" option (0 = weakest, 20 = full strength)
+var _start_fen := START_FEN  # starting position of the current game (scenarios)
 var _mutex := Mutex.new()
 
 
@@ -259,10 +260,16 @@ func _wait_for(prefix: String) -> String:
 	return ""
 
 
+# Starting position for the following searches (set once per game, before
+# any search runs). Moves are always given relative to it.
+func set_start_fen(fen: String) -> void:
+	_start_fen = fen
+
 func _position_cmd(moves: Array) -> String:
+	var base := "position startpos" if _start_fen == START_FEN else "position fen " + _start_fen
 	if moves.is_empty():
-		return "position startpos"
-	return "position startpos moves " + " ".join(PackedStringArray(moves))
+		return base
+	return base + " moves " + " ".join(PackedStringArray(moves))
 
 
 func _go_cmd(movetime_ms: int, depth: int) -> String:

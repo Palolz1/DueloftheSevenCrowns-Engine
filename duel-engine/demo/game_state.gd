@@ -53,6 +53,8 @@ var position_keys: Array = []
 # One snapshot per position of the game (index = ply, 0 = start), used to
 # review a finished game move by move: {board, last_move, turn, in_check}.
 var snapshots: Array = []
+# Starting position (see scenarios.gd). "classic" = the standard setup.
+var scenario_id := "classic"
 var game_over: bool = false
 var current_eval_score: float = 0.0
 # White-relative mate string from the engine ("M3" = White mates in 3,
@@ -311,7 +313,7 @@ func reset_game():
 	_stop_hint_thread()
 	hint_arrow = null
 	hint_gen += 1
-	board = _create_starting_board()
+	board = Scenarios.make_board(scenario_id)
 	turn = "white"
 	selected_square = []
 	legal_moves = []
@@ -319,9 +321,12 @@ func reset_game():
 	halfmove_clock = 0
 	move_history.clear()
 	uci_moves.clear()
+	var start_fen := Scenarios.board_to_fen(board)
 	if fairy != null:
+		fairy.set_start_fen(start_fen)
 		fairy.new_game()
 	if fairy_hint != null:
+		fairy_hint.set_start_fen(start_fen)
 		fairy_hint.new_game()
 	game_over = false
 	current_eval_score = 0.0

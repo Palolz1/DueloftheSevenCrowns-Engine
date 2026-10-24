@@ -3,13 +3,14 @@
 # personality) and the time control.
 extends Control
 
-signal players_selected(white_type: String, black_type: String, game_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float)
+signal players_selected(white_type: String, black_type: String, game_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float, scenario_id: String)
 
 # Choices survive "New game" (the screen is rebuilt each time).
 static var _saved := {
 	"white": "human", "black": "medium",
 	"white_bot": "medium", "black_bot": "medium",
 	"game_type": "untimed", "standard": 15.0, "arma_white": 10.0, "arma_black": 8.0,
+	"scenario": "classic",
 }
 
 var white_type: String = "human"
@@ -74,6 +75,9 @@ class CrownMeter:
 var _cards := {}   # color -> {human, bot, human_box, bot_box, choices}
 var _standard_row: Control
 var _arma_row: Control
+var scenario_id := "classic"
+var _scenario_btn: Button
+var _scenario_page: Control = null
 
 
 func _ready():
@@ -86,6 +90,7 @@ func _ready():
 	standard_minutes = _saved.standard
 	armageddon_white_minutes = _saved.arma_white
 	armageddon_black_minutes = _saved.arma_black
+	scenario_id = _saved.scenario
 	_build_ui()
 
 
@@ -192,6 +197,18 @@ func _build_ui():
 	settings.add_child(_arma_row)
 	_set_game_type(game_type)
 
+	# Starting position (opens the Starting Positions page)
+	var pos_col := UITheme.vbox(8)
+	brow.add_child(pos_col)
+	pos_col.add_child(UITheme.heading("Starting position"))
+	_scenario_btn = UITheme.button("", "secondary", 14, 36)
+	_scenario_btn.custom_minimum_size.x = 210
+	_scenario_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_scenario_btn.tooltip_text = "Alternative armies, drills and handicaps"
+	_scenario_btn.pressed.connect(_open_scenarios)
+	pos_col.add_child(_scenario_btn)
+	_update_scenario_button()
+
 	var start := UITheme.button("Start game", "primary", 19, 56)
 	start.custom_minimum_size = Vector2(230, 56)
 	start.add_theme_font_override("font", UITheme.ui(700))
@@ -199,6 +216,26 @@ func _build_ui():
 	start.pressed.connect(_on_start)
 	brow.add_child(start)
 
+
+func _update_scenario_button():
+	_scenario_btn.text = Scenarios.get_info(scenario_id).name + "   ›"
+
+func _open_scenarios():
+	if _scenario_page != null:
+		return
+	_scenario_page = preload("res://scenario_page.gd").new()
+	_scenario_page.selected_id = scenario_id
+	_scenario_page.chosen.connect(func(id):
+		scenario_id = id
+		_update_scenario_button()
+		_close_scenarios())
+	_scenario_page.closed.connect(_close_scenarios)
+	add_child(_scenario_page)
+
+func _close_scenarios():
+	if _scenario_page != null:
+		_scenario_page.queue_free()
+		_scenario_page = null
 
 func _time_label(t: String) -> Label:
 	var l := UITheme.label(t, 14, UITheme.TEXT_DIM, UITheme.ui(500))
@@ -409,11 +446,13 @@ func _on_start():
 	_saved.standard = standard_minutes
 	_saved.arma_white = armageddon_white_minutes
 	_saved.arma_black = armageddon_black_minutes
+	_saved.scenario = scenario_id
 	visible = false
 	players_selected.emit(
 		white_type, black_type, game_type,
 		standard_minutes * 60.0,
 		armageddon_white_minutes * 60.0,
-		armageddon_black_minutes * 60.0
+		armageddon_black_minutes * 60.0,
+		scenario_id
 	)
 	queue_free()

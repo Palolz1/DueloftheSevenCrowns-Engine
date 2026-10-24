@@ -107,10 +107,14 @@ func _show_player_setup():
 	get_tree().root.add_child(player_setup)  # Add to viewport root
 	player_setup.set_anchors_preset(Control.PRESET_FULL_RECT)
 
-func _on_players_selected(w_type: String, b_type: String, g_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float):
+func _on_players_selected(w_type: String, b_type: String, g_type: String, standard_seconds: float, armageddon_white_seconds: float, armageddon_black_seconds: float, scenario_id: String = "classic"):
 	white_player = w_type
 	black_player = b_type
 	game_type = g_type
+	# Set up the chosen starting position (Shuffled Court draws a new one).
+	game_state.scenario_id = scenario_id
+	game_state.reset_game()
+	ui_controller.set_mode_name("" if scenario_id == "classic" else Scenarios.get_info(scenario_id).name)
 	ui_controller.reset_for_new_game()
 	ui_controller.set_player_labels(white_player, black_player)
 

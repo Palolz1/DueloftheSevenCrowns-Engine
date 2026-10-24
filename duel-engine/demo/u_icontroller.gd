@@ -255,6 +255,7 @@ var _eval_graph: EvalGraph
 var _moves_grid: GridContainer
 var _moves_scroll: ScrollContainer
 var _game_over_layer: Control = null
+var _mode_label: Label   # starting-position name (hidden for Classic)
 var _review_bar: HBoxContainer
 var _review_label: Label
 var _review_btns := {}
@@ -339,6 +340,9 @@ func _create_ui():
 	turn_row.add_child(UITheme.label("•", 13, UITheme.TEXT_FAINT))
 	turn_label = UITheme.label("White to move", 13, UITheme.TEXT, UITheme.ui(600))
 	turn_row.add_child(turn_label)
+	_mode_label = UITheme.label("", 13, UITheme.GOLD, UITheme.ui(650))
+	_mode_label.visible = false
+	turn_row.add_child(_mode_label)
 
 	# Status line (check, game over, ...)
 	status_label = UITheme.label("", 14, UITheme.GOLD_LIGHT, UITheme.ui(600))
@@ -434,6 +438,11 @@ func _create_ui():
 	new_game_btn.pressed.connect(_on_new_game)
 	col.add_child(new_game_btn)
 
+
+# Shows the starting-position name in the header ("" for Classic).
+func set_mode_name(n: String):
+	_mode_label.text = "·  " + n if n != "" else ""
+	_mode_label.visible = n != ""
 
 # Which bar shows which colour: the side at the bottom of the board gets the
 # bottom bar. Unflipped, White's back rank is drawn at the top.
@@ -705,26 +714,40 @@ func is_result_card_visible() -> bool:
 	return _game_over_layer != null
 
 # Pieces each side has captured (shown on the capturer's bar).
+# Compared with the game's own starting position, so it also works for the
+# alternative setups on the Starting Positions page.
 func _refresh_captured(board: Array):
+	var counts := _count_pieces(board)
+	var game_state = get_parent().get_node_or_null("GameState")
+	var start_counts := _count_pieces(game_state.snapshots[0].board) if game_state != null and not game_state.snapshots.is_empty() else {}
+	for side in ["w", "b"]:
+		var lost: Array = []
+		var have: Dictionary = counts[side]
+		var start_have: Dictionary = start_counts.get(side, {}) if not start_counts.is_empty() else {}
+		for t in PIECE_ORDER:
+			var start: int = start_have.get(t, 0) if not start_counts.is_empty() else START_COUNTS.get(t, 0)
+			var now: int = have.get(t, 0)
+			var missing := start - now
+			if t == "L":
+				# Lancers beyond the starting ones came from promotions; only count
+				# Lancers that existed at the start and are now gone.
+				missing = max(0, start - now)
+			elif t == "D":
+				# a promoted donkey isn't captured: count it via the extra Lancers
+				var extra_lancers: int = max(0, have.get("L", 0) - (start_have.get("L", 0) if not start_counts.is_empty() else 0))
+				missing = start - now - extra_lancers
+			for k in max(0, missing):
+				lost.append(_png_name(t))
+		var capturer := "black" if side == "w" else "white"
+		_bars[capturer].set_captured(lost)
+
+func _count_pieces(board: Array) -> Dictionary:
 	var counts := {"w": {}, "b": {}}
 	for r in board:
 		for p in r:
 			if p != "":
 				counts[p[0]][p[1]] = counts[p[0]].get(p[1], 0) + 1
-	for side in ["w", "b"]:
-		var lost: Array = []
-		var have: Dictionary = counts[side]
-		for t in PIECE_ORDER:
-			var start: int = START_COUNTS.get(t, 0)
-			var now: int = have.get(t, 0)
-			if t == "D":
-				now += have.get("L", 0)  # promoted donkeys aren't captured
-			if t == "L":
-				continue
-			for k in max(0, start - now):
-				lost.append(_png_name(t))
-		var capturer := "black" if side == "w" else "white"
-		_bars[capturer].set_captured(lost)
+	return counts
 
 func _png_name(t: String) -> String:
 	return {"K": "king", "N": "knight", "C": "cardinal", "P": "paladin", "M": "marshal", "D": "donkey", "L": "lancer", "W": "warden"}[t]
